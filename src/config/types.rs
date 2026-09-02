@@ -1,4 +1,5 @@
-use super::ConfigResult;
+use super::SessionAffinityConfig;
+use super::{ConfigError, ConfigResult};
 use crate::config::validation::ConfigValidator;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -242,6 +243,10 @@ pub enum PolicyConfig {
     ConsistentHash {
         /// Number of virtual nodes per worker for better distribution
         virtual_nodes: u32,
+        /// Session-affinity / hash-key extraction settings (agent headers,
+        /// body fields, first-user-prompt fallback). Defaults are built-in.
+        #[serde(default)]
+        session_config: SessionAffinityConfig,
     },
 
     #[serde(rename = "rendezvous_hash")]
@@ -257,6 +262,38 @@ impl PolicyConfig {
             PolicyConfig::PowerOfTwo { .. } => "power_of_two",
             PolicyConfig::ConsistentHash { .. } => "consistent_hash",
             PolicyConfig::RendezvousHash => "rendezvous_hash",
+        }
+    }
+
+    /// Overwrite the `consistent_hash` session-affinity settings from a JSON
+    /// config file. Returns an error if the file is supplied for a policy
+    /// that is not `consistent_hash`.
+    pub fn with_session_affinity_config_file(
+        self,
+        config_path: Option<&std::path::Path>,
+    ) -> ConfigResult<Self> {
+        let Some(path) = config_path else {
+            return Ok(self);
+        };
+
+        match self {
+            PolicyConfig::ConsistentHash {
+                virtual_nodes,
+                session_config: _,
+            } => {
+                let config = SessionAffinityConfig::from_file(path)?;
+                Ok(PolicyConfig::ConsistentHash {
+                    virtual_nodes,
+                    session_config: config,
+                })
+            }
+            other => Err(ConfigError::ValidationFailed {
+                reason: format!(
+                    "hash-key config file '{}' requires --policy consistent_hash, got '{}'",
+                    path.display(),
+                    other.name()
+                ),
+            }),
         }
     }
 }

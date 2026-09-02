@@ -43,16 +43,24 @@ The consistent hash policy extracts a routing key in the following priority orde
 | Priority | Source | Header/Field | Example |
 |----------|--------|--------------|---------|
 | 1 | HTTP Header | `X-Session-ID` | `X-Session-ID: session-abc-123` |
-| 2 | HTTP Header | `X-User-ID` | `X-User-ID: user-456` |
-| 3 | HTTP Header | `X-Tenant-ID` | `X-Tenant-ID: tenant-xyz` |
-| 4 | HTTP Header | `X-Request-ID` | `X-Request-ID: req-789` |
-| 5 | HTTP Header | `X-Correlation-ID` | `X-Correlation-ID: corr-001` |
-| 6 | HTTP Header | `X-Trace-ID` | `X-Trace-ID: trace-002` |
-| 7 | Request Body | `session_params.session_id` | `{"session_params": {"session_id": "..."}}` |
-| 8 | Request Body | `user` | `{"user": "..."}` (OpenAI format) |
-| 9 | Request Body | `session_id` | `{"session_id": "..."}` (legacy) |
-| 10 | Request Body | `user_id` | `{"user_id": "..."}` (legacy) |
-| 11 | Fallback | Request body hash | Hash of entire request body |
+| 2 | HTTP Header | `X-Claude-Code-Session-Id` | Claude Code session header |
+| 3 | HTTP Header | `X-Session-Affinity` / `X-Opencode-Session` | OpenCode / Pi |
+| 4 | HTTP Header | `Session-ID` / `Session_id` | Codex CLI / Pi / Roo / Cline channels |
+| 5 | HTTP Header | `Thread-ID` | Codex thread/conversation |
+| 6 | HTTP Header | `X-User-ID` / `X-Tenant-ID` | User/tenant affinity |
+| 7 | HTTP Header | `X-Correlation-ID` / `X-Request-ID` / `X-Trace-ID` | Backward-compatible; remove via config if per-request |
+| 8 | Request Body | `metadata.user_id` (`_session_<uuid>` suffix) | Claude Code Anthropic body |
+| 9 | Request Body | `client_metadata.session_id` / `thread_id` | Responses API (Codex CLI / Pi) |
+| 10 | Request Body | `session_params.session_id` / `conversation_id` / `session_id` | `{"session_params": {"session_id": "..."}}` |
+| 11 | Request Body | `user` / `user_id` | `{"user": "..."}` (OpenAI format) |
+| 12 | Fallback | First user prompt hash | Stable anchor for multi-turn coding agents |
+| 13 | Fallback | Request body hash | Legacy deterministic fallback |
+
+The built-in header list includes the session identifiers used by mainstream
+coding agents (Claude Code, Codex CLI, OpenCode, Pi, Roo Code, Cline). The list
+is configurable via `--hash-key-config <file.json>`; see
+[Session affinity for coding agents](session_affinity_coding_agents.md) for the
+config schema, usage examples and design notes.
 
 ### Usage Examples
 

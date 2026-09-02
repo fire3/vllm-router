@@ -23,6 +23,9 @@ target
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 .idea/
 
+# Local Claude Code settings
+.claude/
+
 # Local test cache
 .tokenizer_cache/
 # Python virtual environment

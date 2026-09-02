@@ -820,4 +820,85 @@ mod consistent_hash_policy_tests {
             "x-tenant-id should take priority over x-correlation-id"
         );
     }
+
+    #[test]
+    fn test_claude_code_session_header_is_sticky() {
+        let policy = ConsistentHashPolicy::new();
+        let workers = create_test_workers();
+
+        let headers = create_headers(&[("x-claude-code-session-id", "cc-session-42")]);
+        let mut selected = Vec::new();
+        for turn in 0..5 {
+            let body = format!(
+                r#"{{"model":"claude-sonnet","messages":[{{"role":"user","content":"turn {}"}}]}}"#,
+                turn
+            );
+            selected.push(
+                policy
+                    .select_worker_with_headers(&workers, Some(&body), Some(&headers))
+                    .expect("should route"),
+            );
+        }
+        assert!(selected.iter().all(|&idx| idx == selected[0]));
+    }
+
+    #[test]
+    fn test_claude_code_metadata_user_id_session_suffix_is_sticky() {
+        let policy = ConsistentHashPolicy::new();
+        let workers = create_test_workers();
+
+        let body = r#"{
+            "model": "claude-sonnet",
+            "metadata": {
+                "user_id": "user_abc_account__session_aaaa1111-2222-3333-4444-555566667777"
+            },
+            "messages": [{"role": "user", "content": "hello"}]
+        }"#;
+        let first = policy
+            .select_worker(&workers, Some(body))
+            .expect("should route");
+        for _ in 0..5 {
+            assert_eq!(
+                policy.select_worker(&workers, Some(body)),
+                Some(first),
+                "same Claude Code session should stay sticky"
+            );
+        }
+    }
+
+    #[test]
+    fn test_first_user_prompt_fallback_is_sticky_across_coding_agent_turns() {
+        let policy = ConsistentHashPolicy::new();
+        let workers = create_test_workers();
+
+        let turn1 = r#"{
+            "model": "gpt-5-codex",
+            "messages": [
+                {"role": "system", "content": "you are a coding agent"},
+                {"role": "user", "content": "implement the hash key feature"}
+            ]
+        }"#;
+        let turn5 = r#"{
+            "model": "gpt-5-codex",
+            "messages": [
+                {"role": "system", "content": "you are a coding agent"},
+                {"role": "user", "content": "implement the hash key feature"},
+                {"role": "assistant", "content": "sure, here is a plan"},
+                {"role": "user", "content": [{"type": "tool_result", "content": "done"}],
+                 "tool_call_id": "call_1"},
+                {"role": "user", "content": "now write the tests"}
+            ]
+        }"#;
+
+        let first = policy
+            .select_worker(&workers, Some(turn1))
+            .expect("should route");
+        let later = policy
+            .select_worker(&workers, Some(turn5))
+            .expect("should route");
+        assert_eq!(
+            first, later,
+            "first-user-prompt fallback should keep multi-turn sessions sticky"
+        );
+    }
 }

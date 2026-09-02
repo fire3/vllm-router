@@ -217,6 +217,22 @@ curl -X POST http://router:8000/v1/chat/completions \
   -d '{"model": "llama-3", "messages": [{"role": "user", "content": "Hello!"}]}'
 ```
 
+The built-in session header list covers mainstream coding agents (Claude Code
+`x-claude-code-session-id`, OpenCode `x-session-affinity`, Codex/Pi
+`session-id`/`thread-id`, etc.). You can extend or override the list with a JSON
+config file:
+
+```bash
+vllm-router --policy consistent_hash \
+  --worker-urls http://worker1:8000 \
+  --hash-key-config examples/configs/consistent_hash_session_config.minimal.json
+```
+
+When neither headers nor body fields carry a session identifier, the router
+falls back to hashing the **first user prompt**, which keeps multi-turn coding
+agent sessions sticky. See
+[Session affinity for coding agents](docs/load_balancing/session_affinity_coding_agents.md).
+
 For detailed configuration options, hash key priorities, and usage examples, see [Load Balancing Documentation](docs/load_balancing/README.md).
 
 ## Advanced Features

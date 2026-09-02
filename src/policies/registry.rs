@@ -172,6 +172,10 @@ impl PolicyRegistry {
             "random" => Arc::new(RandomPolicy::new()),
             "cache_aware" => Arc::new(CacheAwarePolicy::new()),
             "power_of_two" => Arc::new(PowerOfTwoPolicy::new()),
+            "consistent_hash" => Self::create_policy_from_config(&PolicyConfig::ConsistentHash {
+                virtual_nodes: 160,
+                session_config: crate::config::SessionAffinityConfig::default(),
+            }),
             "rendezvous_hash" => Arc::new(RendezvousHashPolicy::new()),
             _ => {
                 warn!("Unknown policy type '{}', using default", policy_type);
@@ -202,7 +206,12 @@ impl PolicyRegistry {
                 Arc::new(CacheAwarePolicy::with_config(cache_config))
             }
             PolicyConfig::PowerOfTwo { .. } => Arc::new(PowerOfTwoPolicy::new()),
-            PolicyConfig::ConsistentHash { .. } => Arc::new(ConsistentHashPolicy::new()),
+            PolicyConfig::ConsistentHash {
+                session_config,
+                virtual_nodes: _,
+            } => Arc::new(ConsistentHashPolicy::with_session_config(
+                session_config.clone(),
+            )),
             PolicyConfig::RendezvousHash => Arc::new(RendezvousHashPolicy::new()),
         }
     }

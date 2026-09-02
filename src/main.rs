@@ -1,9 +1,10 @@
 use clap::{ArgAction, Parser, ValueEnum};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use vllm_router_rs::config::{
     CircuitBreakerConfig, ConfigError, ConfigResult, ConnectionMode, DiscoveryConfig,
     HealthCheckConfig, HistoryBackend, KvConnector, MetricsConfig, PolicyConfig, RetryConfig,
-    RouterConfig, RoutingMode, TraceConfig,
+    RouterConfig, RoutingMode, SessionAffinityConfig, TraceConfig,
 };
 use vllm_router_rs::metrics::PrometheusConfig;
 use vllm_router_rs::server::{self, ServerConfig};
@@ -109,6 +110,12 @@ struct CliArgs {
     /// Load balancing policy to use
     #[arg(long, default_value = "cache_aware", value_parser = ["random", "round_robin", "cache_aware", "power_of_two", "consistent_hash", "rendezvous_hash"])]
     policy: String,
+
+    /// JSON config file for session-affinity / hash-key extraction
+    /// (consistent_hash policy only). Example:
+    /// {"extra_session_headers": ["x-my-session"], "fallback_to_first_user_prompt": true}
+    #[arg(long)]
+    hash_key_config: Option<PathBuf>,
 
     /// Enable vLLM PD (Prefill-Decode) disaggregated mode with vLLM-specific two-stage processing
     #[arg(long, default_value_t = false)]
@@ -371,10 +378,18 @@ impl CliArgs {
             },
             "consistent_hash" => PolicyConfig::ConsistentHash {
                 virtual_nodes: 160, // Default value
+                session_config: SessionAffinityConfig::default(),
             },
             "rendezvous_hash" => PolicyConfig::RendezvousHash,
             _ => PolicyConfig::RoundRobin, // Fallback
         }
+    }
+
+    /// Parse a policy name and attach session-affinity settings from the
+    /// optional `--hash-key-config` file.
+    fn parse_policy_with_hash_key_config(&self, policy_str: &str) -> ConfigResult<PolicyConfig> {
+        let policy = self.parse_policy(policy_str);
+        policy.with_session_affinity_config_file(self.hash_key_config.as_deref())
     }
 
     /// Convert CLI arguments to RouterConfig
@@ -443,8 +458,16 @@ impl CliArgs {
             RoutingMode::VllmPrefillDecode {
                 prefill_urls: prefill_urls.clone(),
                 decode_urls: final_decode_urls,
-                prefill_policy: self.prefill_policy.as_ref().map(|p| self.parse_policy(p)),
-                decode_policy: self.decode_policy.as_ref().map(|p| self.parse_policy(p)),
+                prefill_policy: self
+                    .prefill_policy
+                    .as_ref()
+                    .map(|p| self.parse_policy_with_hash_key_config(p))
+                    .transpose()?,
+                decode_policy: self
+                    .decode_policy
+                    .as_ref()
+                    .map(|p| self.parse_policy_with_hash_key_config(p))
+                    .transpose()?,
                 discovery_address: self.vllm_discovery_address.clone(),
             }
         } else {
@@ -461,7 +484,7 @@ impl CliArgs {
         };
 
         // Main policy
-        let policy = self.parse_policy(&self.policy);
+        let policy = self.parse_policy_with_hash_key_config(&self.policy)?;
 
         // Service discovery configuration
         let discovery = if self.service_discovery {
@@ -737,4 +760,45 @@ Provide --worker-urls or PD flags as usual.",
     })?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_hash_key_config_is_loaded_from_cli_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("session.json");
+        std::fs::write(
+            &config_path,
+            r#"{"extra_session_headers": ["x-cli-session"]}"#,
+        )
+        .unwrap();
+
+        let cli = CliArgs::try_parse_from([
+            "vllm-router",
+            "--worker-urls",
+            "http://worker1:8000",
+            "--policy",
+            "consistent_hash",
+            "--hash-key-config",
+            config_path.to_str().unwrap(),
+        ])
+        .expect("CLI args should parse");
+
+        let policy = cli
+            .parse_policy_with_hash_key_config("consistent_hash")
+            .expect("policy config should load");
+        match policy {
+            PolicyConfig::ConsistentHash { session_config, .. } => {
+                assert_eq!(
+                    session_config.extra_session_headers,
+                    vec!["x-cli-session".to_string()]
+                );
+            }
+            other => panic!("expected consistent_hash, got {}", other.name()),
+        }
+    }
 }

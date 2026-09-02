@@ -1853,7 +1853,10 @@ mod tests {
     fn create_test_consistent_hash_router() -> Router {
         let worker_registry = Arc::new(WorkerRegistry::new());
         let policy_registry = Arc::new(PolicyRegistry::new(
-            crate::config::types::PolicyConfig::ConsistentHash { virtual_nodes: 100 },
+            crate::config::types::PolicyConfig::ConsistentHash {
+                virtual_nodes: 100,
+                session_config: crate::config::SessionAffinityConfig::default(),
+            },
         ));
 
         let worker1 = BasicWorker::new("http://worker1:8080".to_string(), WorkerType::Regular);

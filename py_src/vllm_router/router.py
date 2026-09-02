@@ -78,6 +78,10 @@ class Router:
         request_id_headers: List of HTTP headers to check for request IDs. If not specified,
             uses common defaults: ['x-request-id', 'x-correlation-id', 'x-trace-id', 'request-id'].
             Example: ['x-my-request-id', 'x-custom-trace-id']. Default: None
+        hash_key_config: Optional JSON config file for session-affinity / hash-key
+            extraction (only applied when policy is consistent_hash). Lets you add
+            extra session header names, disable body extraction, or disable the
+            first-user-prompt fallback. Default: None (built-in defaults).
         bootstrap_port_annotation: Kubernetes annotation name for bootstrap port (PD mode).
             Default: 'vllm.ai/bootstrap-port'
         request_timeout_secs: Request timeout in seconds. Default: 600

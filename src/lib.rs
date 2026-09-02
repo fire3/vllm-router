@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 pub mod config;
 pub mod logging;
 use std::collections::HashMap;
+use std::path::Path;
 
 pub mod core;
 pub mod data_connector;
@@ -60,6 +61,7 @@ struct Router {
     prometheus_host: Option<String>,
     request_timeout_secs: u64,
     request_id_headers: Option<Vec<String>>,
+    hash_key_config: Option<String>,
     vllm_pd_disaggregation: bool,
     vllm_discovery_address: Option<String>,
     prefill_urls: Option<Vec<(String, Option<u16>)>>,
@@ -104,6 +106,7 @@ impl Router {
     pub fn to_router_config(&self) -> config::ConfigResult<config::RouterConfig> {
         use config::{
             DiscoveryConfig, MetricsConfig, PolicyConfig as ConfigPolicyConfig, RoutingMode,
+            SessionAffinityConfig,
         };
 
         // Convert policy helper function
@@ -123,9 +126,18 @@ impl Router {
                 },
                 PolicyType::ConsistentHash => ConfigPolicyConfig::ConsistentHash {
                     virtual_nodes: 160, // Default value
+                    session_config: SessionAffinityConfig::default(),
                 },
             }
         };
+        // Attach the optional session-affinity JSON config file to every
+        // consistent_hash policy (main + PD prefill/decode).
+        let apply_hash_key_config =
+            |policy: ConfigPolicyConfig| -> config::ConfigResult<ConfigPolicyConfig> {
+                policy.with_session_affinity_config_file(
+                    self.hash_key_config.as_deref().map(Path::new),
+                )
+            };
 
         // Determine routing mode
         let mode = if self.enable_igw {
@@ -137,8 +149,18 @@ impl Router {
             RoutingMode::VllmPrefillDecode {
                 prefill_urls: self.prefill_urls.clone().unwrap_or_default(),
                 decode_urls: self.decode_urls.clone().unwrap_or_default(),
-                prefill_policy: self.prefill_policy.as_ref().map(convert_policy),
-                decode_policy: self.decode_policy.as_ref().map(convert_policy),
+                prefill_policy: self
+                    .prefill_policy
+                    .as_ref()
+                    .map(convert_policy)
+                    .map(apply_hash_key_config)
+                    .transpose()?,
+                decode_policy: self
+                    .decode_policy
+                    .as_ref()
+                    .map(convert_policy)
+                    .map(apply_hash_key_config)
+                    .transpose()?,
                 discovery_address: self.vllm_discovery_address.clone(),
             }
         } else {
@@ -148,7 +170,7 @@ impl Router {
         };
 
         // Convert main policy
-        let policy = convert_policy(&self.policy);
+        let policy = apply_hash_key_config(convert_policy(&self.policy))?;
 
         // Service discovery configuration
         let discovery = if self.service_discovery {
@@ -310,6 +332,8 @@ impl Router {
         otlp_traces_endpoint = None,
         // KV connector default (PD disaggregation)
         kv_connector = String::from("nixl"),
+        // Session-affinity config file (consistent_hash only)
+        hash_key_config = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -372,6 +396,7 @@ impl Router {
         enable_trace: bool,
         otlp_traces_endpoint: Option<String>,
         kv_connector: String,
+        hash_key_config: Option<String>,
     ) -> PyResult<Self> {
         Ok(Router {
             host,
@@ -402,6 +427,7 @@ impl Router {
             prometheus_host,
             request_timeout_secs,
             request_id_headers,
+            hash_key_config,
             vllm_pd_disaggregation,
             vllm_discovery_address,
             prefill_urls,

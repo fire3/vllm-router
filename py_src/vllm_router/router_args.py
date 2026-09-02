@@ -25,6 +25,8 @@ class RouterArgs:
     policy: str = "cache_aware"
     prefill_policy: Optional[str] = None  # Specific policy for prefill nodes in PD mode
     decode_policy: Optional[str] = None  # Specific policy for decode nodes in PD mode
+    # Session-affinity / hash-key config file (JSON, consistent_hash only)
+    hash_key_config: Optional[str] = None
     worker_startup_timeout_secs: int = 600
     worker_startup_check_interval: int = 30
     cache_threshold: float = 0.3
@@ -168,6 +170,15 @@ class RouterArgs:
                 "consistent_hash",
             ],
             help="Specific policy for decode nodes in PD mode. If not specified, uses the main policy",
+        )
+        parser.add_argument(
+            f"--{prefix}hash-key-config",
+            type=str,
+            default=None,
+            help="JSON config file for session-affinity / hash-key extraction "
+            "(only applies to consistent_hash policy). "
+            "Example: {'extra_session_headers': ['x-my-session'], "
+            "'fallback_to_first_user_prompt': true}",
         )
 
         # PD-specific arguments
@@ -518,6 +529,20 @@ class RouterArgs:
         return cls(**args_dict)
 
     def _validate_router_args(self):
+        # A session-affinity config only applies to consistent_hash policies.
+        if self.hash_key_config:
+            if self.vllm_pd_disaggregation:
+                effective_policies = [
+                    self.prefill_policy or self.policy,
+                    self.decode_policy or self.policy,
+                ]
+            else:
+                effective_policies = [self.policy]
+            if any(p != "consistent_hash" for p in effective_policies):
+                raise ValueError(
+                    "--hash-key-config requires consistent_hash for all effective policies"
+                )
+
         # Validate configuration based on mode
         if self.vllm_pd_disaggregation:
             # Validate PD configuration - skip URL requirements if using service discovery

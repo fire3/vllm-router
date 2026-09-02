@@ -14,6 +14,7 @@ use super::get_healthy_worker_indices;
 use super::hash_key;
 use super::LoadBalancingPolicy;
 use super::RequestHeaders;
+use crate::config::SessionAffinityConfig;
 use crate::core::Worker;
 use crate::metrics::RouterMetrics;
 
@@ -30,14 +31,27 @@ pub struct ConsistentHashPolicy {
     hash_ring: RwLock<BTreeMap<u64, String>>,
     /// Current set of workers (for detecting changes)
     current_workers: RwLock<Vec<String>>,
+    /// Session-affinity / hash-key extraction configuration
+    session_config: SessionAffinityConfig,
 }
 
 impl ConsistentHashPolicy {
     pub fn new() -> Self {
+        Self::with_session_config(SessionAffinityConfig::default())
+    }
+
+    /// Create a policy with custom session-affinity settings.
+    pub fn with_session_config(session_config: SessionAffinityConfig) -> Self {
         Self {
             hash_ring: RwLock::new(BTreeMap::new()),
             current_workers: RwLock::new(Vec::new()),
+            session_config,
         }
+    }
+
+    /// Current session-affinity configuration (used by tests/metrics).
+    pub fn session_config(&self) -> &SessionAffinityConfig {
+        &self.session_config
     }
 
     /// MurmurHash64A implementation from Facebook's mcrouter/lib/fbi/hash.c
@@ -344,7 +358,8 @@ impl LoadBalancingPolicy for ConsistentHashPolicy {
         self.update_hash_ring(workers);
 
         // Extract hash key with priority: headers > body > fallback
-        let hash_key = hash_key::extract_hash_key(request_text, headers);
+        let hash_key =
+            hash_key::extract_hash_key_with_config(request_text, headers, &self.session_config);
 
         // DEBUG: Log the request text and extracted hash key
         if let Some(text) = request_text {
@@ -550,5 +565,42 @@ mod tests {
         assert_eq!(idx1, idx2);
         assert_eq!(idx2, idx3);
         assert!(idx1.is_some());
+    }
+
+    #[test]
+    fn test_consistent_hash_uses_custom_session_header_config() {
+        let config = SessionAffinityConfig {
+            session_headers: Some(vec!["x-my-session".to_string()]),
+            ..SessionAffinityConfig::default()
+        };
+        let policy = ConsistentHashPolicy::with_session_config(config);
+        let workers: Vec<Arc<dyn Worker>> = vec![
+            Arc::new(BasicWorker::new(
+                "http://worker1:8000".to_string(),
+                WorkerType::Regular,
+            )),
+            Arc::new(BasicWorker::new(
+                "http://worker2:8000".to_string(),
+                WorkerType::Regular,
+            )),
+        ];
+
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("x-my-session".to_string(), "agent-session-1".to_string());
+
+        let idx1 = policy
+            .select_worker_with_headers(&workers, None, Some(&headers))
+            .unwrap();
+        let idx2 = policy
+            .select_worker_with_headers(&workers, None, Some(&headers))
+            .unwrap();
+        assert_eq!(idx1, idx2);
+
+        let mut other_headers = headers.clone();
+        other_headers.insert("x-my-session".to_string(), "agent-session-2".to_string());
+        let other_idx = policy
+            .select_worker_with_headers(&workers, None, Some(&other_headers))
+            .unwrap();
+        assert!(idx1 != other_idx || workers.len() == 1);
     }
 }

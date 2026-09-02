@@ -1,6 +1,8 @@
+mod session_affinity;
 pub mod types;
 pub mod validation;
 
+pub use session_affinity::*;
 pub use types::*;
 pub use validation::*;
 

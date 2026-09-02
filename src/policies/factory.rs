@@ -33,10 +33,15 @@ impl PolicyFactory {
                 };
                 Arc::new(CacheAwarePolicy::with_config(config))
             }
-            PolicyConfig::ConsistentHash { virtual_nodes: _ } => {
+            PolicyConfig::ConsistentHash {
+                virtual_nodes: _,
+                session_config,
+            } => {
                 // Note: virtual_nodes parameter is available but not currently used
                 // The consistent hash policy uses a hardcoded value for now
-                Arc::new(ConsistentHashPolicy::new())
+                Arc::new(ConsistentHashPolicy::with_session_config(
+                    session_config.clone(),
+                ))
             }
             PolicyConfig::RendezvousHash => Arc::new(RendezvousHashPolicy::new()),
         }
@@ -87,8 +92,10 @@ mod tests {
         assert_eq!(policy.name(), "cache_aware");
 
         // Test ConsistentHash
-        let policy =
-            PolicyFactory::create_from_config(&PolicyConfig::ConsistentHash { virtual_nodes: 160 });
+        let policy = PolicyFactory::create_from_config(&PolicyConfig::ConsistentHash {
+            virtual_nodes: 160,
+            session_config: crate::config::SessionAffinityConfig::default(),
+        });
         assert_eq!(policy.name(), "consistent_hash");
 
         // Test RendezvousHash
@@ -111,5 +118,25 @@ mod tests {
         assert!(PolicyFactory::create_by_name("rendezvous_hash").is_some());
         assert!(PolicyFactory::create_by_name("RendezvousHash").is_some());
         assert!(PolicyFactory::create_by_name("unknown").is_none());
+    }
+
+    #[test]
+    fn test_create_from_config_preserves_session_config() {
+        let policy_config = crate::config::PolicyConfig::ConsistentHash {
+            virtual_nodes: 160,
+            session_config: crate::config::SessionAffinityConfig {
+                session_headers: Some(vec!["x-my-session".to_string()]),
+                ..crate::config::SessionAffinityConfig::default()
+            },
+        };
+        let policy = PolicyFactory::create_from_config(&policy_config);
+        let consistent = policy
+            .as_any()
+            .downcast_ref::<ConsistentHashPolicy>()
+            .expect("consistent hash policy");
+        assert_eq!(
+            consistent.session_config().session_headers,
+            Some(vec!["x-my-session".to_string()])
+        );
     }
 }

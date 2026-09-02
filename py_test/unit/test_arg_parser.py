@@ -25,6 +25,8 @@ class TestRouterArgs:
         assert args.policy == "cache_aware"
         assert args.worker_urls == []
         assert args.vllm_pd_disaggregation is False
+        assert args.hash_key_config is None
+
         assert args.prefill_urls == []
         assert args.decode_urls == []
 
@@ -43,6 +45,20 @@ class TestRouterArgs:
         assert args.cb_failure_threshold == 10
         assert args.disable_retries is False
         assert args.disable_circuit_breaker is False
+
+    def test_hash_key_config_requires_consistent_policy(self):
+        """A hash-key config file must only be used with consistent_hash."""
+        bad_args = RouterArgs(policy="round_robin", hash_key_config="session.json")
+        with pytest.raises(ValueError, match="consistent_hash"):
+            bad_args._validate_router_args()
+
+        good_args = RouterArgs(
+            policy="consistent_hash",
+            worker_urls=["http://worker1:8000"],
+            hash_key_config="session.json",
+        )
+        # No exception when consistent_hash is used.
+        good_args._validate_router_args()
 
     def test_parse_selector_valid(self):
         """Test parsing valid selector arguments."""
@@ -470,6 +486,24 @@ class TestParseRouterArgs:
         assert router_args.decode_urls == ["http://decode1:8001", "http://decode2:8001"]
         assert router_args.prefill_policy == "power_of_two"
         assert router_args.decode_policy == "round_robin"
+
+    def test_parse_hash_key_config_arg(self):
+        """Test parsing the hash-key config file argument."""
+        args = [
+            "--worker-urls",
+            "http://worker1:8000",
+            "--policy",
+            "consistent_hash",
+            "--hash-key-config",
+            "examples/configs/consistent_hash_session_config.minimal.json",
+        ]
+
+        router_args = parse_router_args(args)
+
+        assert router_args.policy == "consistent_hash"
+        assert router_args.hash_key_config == (
+            "examples/configs/consistent_hash_session_config.minimal.json"
+        )
 
     def test_parse_service_discovery_args(self):
         """Test parsing service discovery arguments."""

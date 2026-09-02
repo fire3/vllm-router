@@ -1,0 +1,21 @@
+{
+  "session_headers": [
+    "x-session-id",
+    "x-claude-code-session-id",
+    "x-session-affinity",
+    "x-opencode-session",
+    "session-id",
+    "session_id",
+    "thread-id",
+    "x-user-id",
+    "x-tenant-id",
+    "x-correlation-id",
+    "x-request-id",
+    "x-trace-id"
+  ],
+  "extra_session_headers": [
+    "x-gateway-session-id"
+  ],
+  "use_body_session_fields": true,
+  "fallback_to_first_user_prompt": true
+}

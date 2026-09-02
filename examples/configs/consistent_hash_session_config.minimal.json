@@ -1,0 +1,8 @@
+{
+  "extra_session_headers": [
+    "x-my-session-id",
+    "x-gateway-conversation-id"
+  ],
+  "use_body_session_fields": true,
+  "fallback_to_first_user_prompt": true
+}
