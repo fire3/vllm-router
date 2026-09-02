@@ -2,6 +2,7 @@
 //!
 //! Provides centralized registry for workers with model-based indexing
 
+use crate::core::{AdmissionReject, WorkerAdmission, WorkerAdmissionConfig, WorkerSlotPermit};
 use crate::core::{ConnectionMode, Worker, WorkerType};
 use dashmap::DashMap;
 use std::sync::{Arc, RwLock};
@@ -57,11 +58,19 @@ pub struct WorkerRegistry {
 
     /// URL to worker ID mapping (for backward compatibility)
     url_to_id: Arc<DashMap<String, WorkerId>>,
+
+    /// Per-worker in-flight admission gate
+    admission: WorkerAdmission,
 }
 
 impl WorkerRegistry {
     /// Create a new worker registry
     pub fn new() -> Self {
+        Self::with_admission_config(WorkerAdmissionConfig::default())
+    }
+
+    /// Create a worker registry with per-worker admission configured.
+    pub fn with_admission_config(config: WorkerAdmissionConfig) -> Self {
         Self {
             workers: Arc::new(DashMap::new()),
             model_workers: Arc::new(DashMap::new()),
@@ -69,7 +78,18 @@ impl WorkerRegistry {
             type_workers: Arc::new(DashMap::new()),
             connection_workers: Arc::new(DashMap::new()),
             url_to_id: Arc::new(DashMap::new()),
+            admission: WorkerAdmission::new(config),
         }
+    }
+
+    /// Acquire a per-worker in-flight slot.
+    ///
+    /// Returns `Ok(None)` when the per-worker admission gate is disabled.
+    pub async fn acquire_worker_slot(
+        &self,
+        worker_url: &str,
+    ) -> Result<Option<WorkerSlotPermit>, AdmissionReject> {
+        self.admission.acquire(worker_url).await
     }
 
     /// Register a new worker
@@ -121,6 +141,9 @@ impl WorkerRegistry {
     /// Remove a worker by ID
     pub fn remove(&self, worker_id: &WorkerId) -> Option<Arc<dyn Worker>> {
         if let Some((_, worker)) = self.workers.remove(worker_id) {
+            // Drop any per-worker admission state for this URL.
+            self.admission.remove_worker(worker.url());
+
             // Remove from URL mapping
             self.url_to_id.remove(worker.url());
 

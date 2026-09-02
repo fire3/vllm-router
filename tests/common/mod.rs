@@ -10,10 +10,19 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use vllm_router_rs::config::RouterConfig;
+use vllm_router_rs::core::WorkerAdmissionConfig;
 use vllm_router_rs::server::AppContext;
 
 /// Helper function to create AppContext for tests
 pub fn create_test_context(config: RouterConfig) -> Arc<AppContext> {
+    create_test_context_with_admission(config, WorkerAdmissionConfig::default())
+}
+
+/// Helper function to create AppContext with a per-worker admission gate.
+pub fn create_test_context_with_admission(
+    config: RouterConfig,
+    admission_config: WorkerAdmissionConfig,
+) -> Arc<AppContext> {
     Arc::new(
         AppContext::new(
             config.clone(),
@@ -21,6 +30,7 @@ pub fn create_test_context(config: RouterConfig) -> Arc<AppContext> {
             config.max_concurrent_requests,
             config.rate_limit_tokens_per_second,
             config.api_key_validation_urls.clone(),
+            admission_config,
         )
         .expect("Failed to create AppContext in test"),
     )

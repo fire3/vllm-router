@@ -164,6 +164,20 @@ pub fn init_metrics() {
         "Number of running requests per worker"
     );
 
+    // Per-worker admission control metrics
+    describe_gauge!(
+        "vllm_router_worker_inflight_requests",
+        "Number of requests currently admitted in-flight per worker"
+    );
+    describe_gauge!(
+        "vllm_router_worker_queued_requests",
+        "Number of requests currently queued per worker"
+    );
+    describe_counter!(
+        "vllm_router_worker_admission_rejects_total",
+        "Total requests rejected or timed out by per-worker admission control"
+    );
+
     // Tokenizer metrics
     describe_histogram!(
         "vllm_tokenizer_encode_duration_seconds",
@@ -482,6 +496,29 @@ impl RouterMetrics {
             "worker" => worker.to_string()
         )
         .set(count as f64);
+    }
+
+    pub fn set_worker_inflight_requests(worker: &str, count: usize) {
+        gauge!("vllm_router_worker_inflight_requests",
+            "worker" => worker.to_string()
+        )
+        .set(count as f64);
+    }
+
+    pub fn set_worker_queued_requests(worker: &str, count: usize) {
+        gauge!("vllm_router_worker_queued_requests",
+            "worker" => worker.to_string()
+        )
+        .set(count as f64);
+    }
+
+    pub fn record_worker_admission_reject(worker: &str, reason: &str) {
+        counter!(
+            "vllm_router_worker_admission_rejects_total",
+            "worker" => worker.to_string(),
+            "reason" => reason.to_string()
+        )
+        .increment(1);
     }
 
     // Circuit breaker metrics

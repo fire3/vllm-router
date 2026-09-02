@@ -429,6 +429,16 @@ struct CliArgs {
     #[arg(long, default_value_t = 32768)]
     max_concurrent_requests: usize,
 
+    /// Maximum number of in-flight requests allowed per worker.
+    /// Leave unset (or use 0) to disable the per-worker admission gate.
+    #[arg(long)]
+    max_concurrent_requests_per_worker: Option<usize>,
+
+    /// Per-worker queue capacity when the in-flight limit is reached
+    /// (0 = no queue, reject immediately with 429).
+    #[arg(long, default_value_t = 100)]
+    worker_queue_size: usize,
+
     /// CORS allowed origins
     #[arg(long, num_args = 0..)]
     cors_allowed_origins: Vec<String>,
@@ -808,6 +818,8 @@ impl CliArgs {
             service_discovery_config,
             prometheus_config,
             request_timeout_secs: self.request_timeout_secs,
+            max_concurrent_requests_per_worker: self.max_concurrent_requests_per_worker,
+            worker_queue_size: self.worker_queue_size,
             request_id_headers: if self.request_id_headers.is_empty() {
                 None
             } else {
@@ -980,6 +992,8 @@ mod tests {
                 "worker_urls": ["http://worker1:8000", "http://worker2:8000"],
                 "policy": "consistent_hash",
                 "retry_max_retries": 3,
+                "max_concurrent_requests_per_worker": 16,
+                "worker_queue_size": 50,
                 "request_id_headers": ["x-session-id"],
                 "service_discovery": true,
                 "selector": {"app": "worker", "env": "prod"}
@@ -1004,6 +1018,8 @@ mod tests {
         );
         assert_eq!(cli.policy, "consistent_hash");
         assert_eq!(cli.retry_max_retries, 3);
+        assert_eq!(cli.max_concurrent_requests_per_worker, Some(16));
+        assert_eq!(cli.worker_queue_size, 50);
         assert_eq!(cli.request_id_headers, vec!["x-session-id".to_string()]);
         assert!(cli.service_discovery);
         assert_eq!(

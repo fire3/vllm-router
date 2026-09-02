@@ -242,6 +242,11 @@ falls back to hashing the **first user prompt**, which keeps multi-turn coding
 agent sessions sticky. See
 [Session affinity for coding agents](docs/load_balancing/session_affinity_coding_agents.md).
 
+When worker compute is limited, combine consistent hashing with the router's
+per-worker admission gate so excess traffic queues at the selected worker
+instead of degrading active agent sessions. See
+[Consistent hash QoS queuing](docs/load_balancing/consistent_hash_qos.md).
+
 For detailed configuration options, hash key priorities, and usage examples, see [Load Balancing Documentation](docs/load_balancing/README.md).
 
 ## Advanced Features

@@ -11,6 +11,7 @@ pub mod error;
 pub mod retry;
 pub mod token_bucket;
 pub mod worker;
+pub mod worker_admission;
 pub mod worker_registry;
 
 // Re-export commonly used types at the module level
@@ -22,5 +23,8 @@ pub use retry::{is_retryable_status, BackoffCalculator, RetryError, RetryExecuto
 pub use worker::{
     start_health_checker, BasicWorker, ConnectionMode, DPAwareWorker, HealthChecker, HealthConfig,
     Worker, WorkerCollection, WorkerFactory, WorkerLoadGuard, WorkerType,
+};
+pub use worker_admission::{
+    AdmissionReject, WorkerAdmission, WorkerAdmissionConfig, WorkerSlotPermit,
 };
 pub use worker_registry::{WorkerId, WorkerRegistry, WorkerRegistryStats};

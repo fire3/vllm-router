@@ -98,6 +98,8 @@ class RouterManager:
                 "disable_circuit_breaker": "--disable-circuit-breaker",
                 # Rate limiting
                 "max_concurrent_requests": "--max-concurrent-requests",
+                "max_concurrent_requests_per_worker": "--max-concurrent-requests-per-worker",
+                "worker_queue_size": "--worker-queue-size",
                 "queue_size": "--queue-size",
                 "queue_timeout_secs": "--queue-timeout-secs",
                 "rate_limit_tokens_per_second": "--rate-limit-tokens-per-second",

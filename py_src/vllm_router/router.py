@@ -86,6 +86,11 @@ class Router:
             Default: 'vllm.ai/bootstrap-port'
         request_timeout_secs: Request timeout in seconds. Default: 600
         max_concurrent_requests: Maximum number of concurrent requests allowed for rate limiting. Default: 256
+        max_concurrent_requests_per_worker: Maximum number of in-flight requests
+            allowed per worker (None/omitted = disabled). Use with consistent_hash
+            to queue excess requests at the selected worker. Default: None
+        worker_queue_size: Per-worker queue capacity when the per-worker
+            in-flight limit is reached (0 = no queue, return 429 immediately). Default: 100
         queue_size: Queue size for pending requests when max concurrent limit reached (0 = no queue, return 429 immediately). Default: 100
         queue_timeout_secs: Maximum time (in seconds) a request can wait in queue before timing out. Default: 60
         rate_limit_tokens_per_second: Token bucket refill rate (tokens per second). If not set, defaults to max_concurrent_requests. Default: None

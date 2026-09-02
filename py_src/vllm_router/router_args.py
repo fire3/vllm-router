@@ -64,6 +64,10 @@ class RouterArgs:
     request_timeout_secs: int = 1800
     # Max concurrent requests for rate limiting
     max_concurrent_requests: int = 32768
+    # Max in-flight requests per worker (None = disabled)
+    max_concurrent_requests_per_worker: Optional[int] = None
+    # Per-worker queue capacity when the in-flight limit is reached
+    worker_queue_size: int = 100
     # Queue size for pending requests when max concurrent limit reached
     queue_size: int = 100
     # Maximum time (in seconds) a request can wait in queue before timing out
@@ -457,6 +461,21 @@ class RouterArgs:
             type=int,
             default=RouterArgs.max_concurrent_requests,
             help="Maximum number of concurrent requests allowed (for rate limiting)",
+        )
+        parser.add_argument(
+            f"--{prefix}max-concurrent-requests-per-worker",
+            type=int,
+            default=None,
+            help="Maximum number of in-flight requests allowed per worker "
+            "(None/omitted = disabled; use with consistent_hash to queue excess "
+            "requests at the selected worker instead of overloading it)",
+        )
+        parser.add_argument(
+            f"--{prefix}worker-queue-size",
+            type=int,
+            default=RouterArgs.worker_queue_size,
+            help="Per-worker queue capacity when the per-worker in-flight limit is reached "
+            "(0 = no queue, return 429 immediately)",
         )
         parser.add_argument(
             f"--{prefix}queue-size",

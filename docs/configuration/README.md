@@ -76,6 +76,7 @@ Python 入口的完整字段与
 - Python launcher：`examples/configs/router_config.example.json`
 - 原生 Rust CLI：`examples/configs/router_config.native.example.json`
 - consistent_hash 会话路由：`examples/configs/consistent_hash_router_config.example.json`
+- consistent_hash + per-worker 排队：`examples/configs/consistent_hash_qos_config.example.json`
 
 ## 4. 与 `--hash-key-config` 的关系
 

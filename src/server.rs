@@ -1,6 +1,6 @@
 use crate::{
     config::{HistoryBackend, RouterConfig, TraceConfig},
-    core::{WorkerRegistry, WorkerType},
+    core::{WorkerAdmissionConfig, WorkerRegistry, WorkerType},
     data_connector::{MemoryResponseStorage, NoOpResponseStorage, SharedResponseStorage},
     logging::{self, LoggingConfig},
     metrics::{self, PrometheusConfig},
@@ -58,11 +58,14 @@ impl AppContext {
         max_concurrent_requests: usize,
         rate_limit_tokens_per_second: Option<usize>,
         api_key_validation_urls: Vec<String>,
+        worker_admission_config: WorkerAdmissionConfig,
     ) -> Result<Self, String> {
         let rate_limit_tokens = rate_limit_tokens_per_second.unwrap_or(max_concurrent_requests);
         let rate_limiter = Arc::new(TokenBucket::new(max_concurrent_requests, rate_limit_tokens));
 
-        let worker_registry = Arc::new(WorkerRegistry::new());
+        let worker_registry = Arc::new(WorkerRegistry::with_admission_config(
+            worker_admission_config,
+        ));
         let policy_registry = Arc::new(PolicyRegistry::new(router_config.policy.clone()));
 
         let router_manager = None;
@@ -685,6 +688,10 @@ pub struct ServerConfig {
     pub service_discovery_config: Option<ServiceDiscoveryConfig>,
     pub prometheus_config: Option<PrometheusConfig>,
     pub request_timeout_secs: u64,
+    /// Max in-flight requests per worker; `None` disables the per-worker gate.
+    pub max_concurrent_requests_per_worker: Option<usize>,
+    /// Per-worker queue capacity when the in-flight limit is reached.
+    pub worker_queue_size: usize,
     pub request_id_headers: Option<Vec<String>>,
     pub trace_config: Option<TraceConfig>,
 }
@@ -874,6 +881,11 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         config.router_config.max_concurrent_requests,
         config.router_config.rate_limit_tokens_per_second,
         config.router_config.api_key_validation_urls.clone(),
+        crate::core::WorkerAdmissionConfig {
+            max_concurrent_requests_per_worker: config.max_concurrent_requests_per_worker,
+            worker_queue_size: config.worker_queue_size,
+            queue_timeout: Duration::from_secs(config.router_config.queue_timeout_secs),
+        },
     )?;
     println!("DEBUG: AppContext created");
 

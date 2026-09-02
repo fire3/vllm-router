@@ -139,6 +139,7 @@ mod test_pd_routing {
                 64,
                 None,
                 config.api_key_validation_urls.clone(),
+                vllm_router_rs::core::WorkerAdmissionConfig::default(),
             )
             .expect("Failed to create AppContext");
             let app_context = std::sync::Arc::new(app_context);

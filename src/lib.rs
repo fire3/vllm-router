@@ -69,6 +69,8 @@ struct Router {
     prefill_policy: Option<PolicyType>,
     decode_policy: Option<PolicyType>,
     max_concurrent_requests: usize,
+    max_concurrent_requests_per_worker: Option<usize>,
+    worker_queue_size: usize,
     cors_allowed_origins: Vec<String>,
     // Retry configuration
     retry_max_retries: u32,
@@ -302,6 +304,8 @@ impl Router {
         prefill_policy = None,
         decode_policy = None,
         max_concurrent_requests = 32768,
+        max_concurrent_requests_per_worker = None,
+        worker_queue_size = 100,
         cors_allowed_origins = vec![],
         // Retry defaults
         retry_max_retries = 5,
@@ -372,6 +376,8 @@ impl Router {
         prefill_policy: Option<PolicyType>,
         decode_policy: Option<PolicyType>,
         max_concurrent_requests: usize,
+        max_concurrent_requests_per_worker: Option<usize>,
+        worker_queue_size: usize,
         cors_allowed_origins: Vec<String>,
         retry_max_retries: u32,
         retry_initial_backoff_ms: u64,
@@ -435,6 +441,8 @@ impl Router {
             prefill_policy,
             decode_policy,
             max_concurrent_requests,
+            max_concurrent_requests_per_worker,
+            worker_queue_size,
             cors_allowed_origins,
             retry_max_retries,
             retry_initial_backoff_ms,
@@ -519,6 +527,8 @@ impl Router {
                 service_discovery_config,
                 prometheus_config,
                 request_timeout_secs: self.request_timeout_secs,
+                max_concurrent_requests_per_worker: self.max_concurrent_requests_per_worker,
+                worker_queue_size: self.worker_queue_size,
                 request_id_headers: self.request_id_headers.clone(),
                 trace_config: if self.enable_trace {
                     Some(config::TraceConfig {

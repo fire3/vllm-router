@@ -572,6 +572,10 @@ class TestParseRouterArgs:
         args = [
             "--max-concurrent-requests",
             "512",
+            "--max-concurrent-requests-per-worker",
+            "24",
+            "--worker-queue-size",
+            "64",
             "--queue-size",
             "200",
             "--queue-timeout-secs",
@@ -583,6 +587,8 @@ class TestParseRouterArgs:
         router_args = parse_router_args(args)
 
         assert router_args.max_concurrent_requests == 512
+        assert router_args.max_concurrent_requests_per_worker == 24
+        assert router_args.worker_queue_size == 64
         assert router_args.queue_size == 200
         assert router_args.queue_timeout_secs == 120
         assert router_args.rate_limit_tokens_per_second == 100

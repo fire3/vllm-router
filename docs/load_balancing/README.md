@@ -130,6 +130,27 @@ curl -X POST http://router:8000/v1/chat/completions \
 - **Virtual nodes**: Uses 160 virtual nodes per worker for even distribution
 - **DP-aware routing**: Supports data-parallel worker URLs (e.g., `http://worker:8000@0`)
 
+### QoS: Per-Worker Queuing for Consistent Hash
+
+`consistent_hash` keeps KV locality, but it is not load-aware. When bursts of
+requests hit a worker, the worker's own scheduler queue can fill up and degrade
+latency for every in-flight agent session. The router can cap in-flight
+requests per worker and queue excess traffic *after* the consistent-hash
+selection, so sessions stay pinned to their worker while busy workers are
+protected:
+
+```bash
+vllm-router \
+  --policy consistent_hash \
+  --worker-urls http://worker1:8000 http://worker2:8000 \
+  --max-concurrent-requests-per-worker 24 \
+  --worker-queue-size 100 \
+  --queue-timeout-secs 60
+```
+
+See [Consistent hash QoS queuing](consistent_hash_qos.md) for design,
+configuration, metrics and tuning guidance.
+
 ---
 
 ## Round Robin
