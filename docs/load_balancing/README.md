@@ -36,6 +36,14 @@ router = Router(
 )
 ```
 
+An end-to-end JSON router config using `consistent_hash` (including a coding
+agent session-header config file) is available at
+`examples/configs/consistent_hash_router_config.example.json`:
+
+```bash
+vllm-router --config examples/configs/consistent_hash_router_config.example.json
+```
+
 ### Hash Key Priority
 
 The consistent hash policy extracts a routing key in the following priority order:

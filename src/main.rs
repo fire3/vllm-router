@@ -1118,4 +1118,31 @@ mod tests {
         assert!(cli.hash_key_config.is_some());
         assert!(prefill_urls.is_empty());
     }
+
+    #[test]
+    fn test_consistent_hash_example_config_parses() {
+        let example = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/configs/consistent_hash_router_config.example.json");
+        let raw = vec![
+            "vllm-router".to_string(),
+            "--config".to_string(),
+            example.to_string_lossy().into_owned(),
+        ];
+        let (cli, _prefill_urls) = parse_cli_and_prefill(&raw).unwrap();
+
+        assert_eq!(cli.policy, "consistent_hash");
+        assert_eq!(
+            cli.worker_urls,
+            vec![
+                "http://worker1:8000".to_string(),
+                "http://worker2:8000".to_string(),
+                "http://worker3:8000".to_string(),
+            ]
+        );
+        assert!(cli
+            .hash_key_config
+            .as_deref()
+            .unwrap()
+            .ends_with("consistent_hash_session_config.full.json"));
+    }
 }

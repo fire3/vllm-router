@@ -88,6 +88,7 @@ Header 匹配不区分大小写（router 内部统一小写）。
 
 仓库内示例：
 
+- `examples/configs/consistent_hash_router_config.example.json`（完整 router 配置，policy=consistent_hash）
 - `examples/configs/consistent_hash_session_config.minimal.json`
 - `examples/configs/consistent_hash_session_config.full.json`
 

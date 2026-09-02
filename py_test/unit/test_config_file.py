@@ -143,3 +143,22 @@ class TestRouterConfigFile:
         assert args.retry_max_retries == 5
         assert args.health_check_endpoint == "/health"
         assert args.cb_failure_threshold == 10
+
+    def test_consistent_hash_example_config_parses(self):
+        example = (
+            pathlib.Path(__file__).resolve().parents[2]
+            / "examples"
+            / "configs"
+            / "consistent_hash_router_config.example.json"
+        )
+        args = parse_router_args(["--config", str(example)])
+
+        assert args.policy == "consistent_hash"
+        assert args.worker_urls == [
+            "http://worker1:8000",
+            "http://worker2:8000",
+            "http://worker3:8000",
+        ]
+        assert args.hash_key_config.endswith(
+            "consistent_hash_session_config.full.json"
+        )
