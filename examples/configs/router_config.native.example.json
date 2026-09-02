@@ -1,0 +1,73 @@
+{
+  "host": "127.0.0.1",
+  "port": 30000,
+
+  "worker_urls": ["http://worker1:8000", "http://worker2:8000"],
+  "policy": "consistent_hash",
+  "hash_key_config": "examples/configs/consistent_hash_session_config.minimal.json",
+
+  "backend": "vllm",
+  "vllm_pd_disaggregation": false,
+  "vllm_discovery_address": null,
+  "decode": [],
+  "prefill_policy": null,
+  "decode_policy": null,
+
+  "worker_startup_timeout_secs": 600,
+  "worker_startup_check_interval": 30,
+  "cache_threshold": 0.3,
+  "balance_abs_threshold": 64,
+  "balance_rel_threshold": 1.5,
+  "eviction_interval": 120,
+  "max_tree_size": 67108864,
+  "max_payload_size": 536870912,
+  "intra_node_data_parallel_size": 1,
+  "api_key": null,
+  "api_key_validation_urls": [],
+
+  "log_dir": null,
+  "log_level": "info",
+
+  "enable_trace": false,
+  "otlp_traces_endpoint": null,
+  "otel_sampling_ratio": 1.0,
+  "otel_excluded_paths": [],
+
+  "service_discovery": false,
+  "selector": [],
+  "service_discovery_port": 80,
+  "service_discovery_namespace": null,
+  "prefill_selector": [],
+  "decode_selector": [],
+
+  "prometheus_port": 29000,
+  "prometheus_host": "127.0.0.1",
+  "request_id_headers": [],
+  "request_timeout_secs": 1800,
+  "max_concurrent_requests": 32768,
+  "cors_allowed_origins": [],
+
+  "retry_max_retries": 5,
+  "retry_initial_backoff_ms": 50,
+  "retry_max_backoff_ms": 30000,
+  "retry_backoff_multiplier": 1.5,
+  "retry_jitter_factor": 0.2,
+  "disable_retries": false,
+
+  "cb_failure_threshold": 10,
+  "cb_success_threshold": 3,
+  "cb_timeout_duration_secs": 60,
+  "cb_window_duration_secs": 120,
+  "disable_circuit_breaker": false,
+
+  "health_failure_threshold": 3,
+  "health_success_threshold": 2,
+  "health_check_timeout_secs": 5,
+  "health_check_interval_secs": 60,
+  "health_check_endpoint": "/health",
+
+  "enable_igw": false,
+  "history_backend": "memory",
+  "profile": false,
+  "kv_connector": "nixl"
+}

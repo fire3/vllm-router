@@ -77,6 +77,15 @@ vllm-router \
     --intra-node-data-parallel-size 8
 ```
 
+All of these options can also be supplied through a single JSON config file:
+
+```bash
+vllm-router --config examples/configs/router_config.example.json
+```
+
+Command line arguments still take precedence for scalar options. See
+[Router config file](docs/configuration/README.md).
+
 #### Prefill-Decode Disaggregation
 ```bash
 # When vLLM runs the NIXL connector, prefill/decode URLs are required.

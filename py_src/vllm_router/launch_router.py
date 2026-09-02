@@ -4,6 +4,7 @@ import sys
 from typing import List, Optional
 
 import setproctitle
+from vllm_router.config_file import parse_with_config
 from vllm_router.mini_lb import MiniLoadBalancer
 from vllm_router.router_args import RouterArgs
 
@@ -97,7 +98,16 @@ Examples:
     )
 
     RouterArgs.add_cli_args(parser, use_router_prefix=False)
-    return RouterArgs.from_cli_args(parser.parse_args(args), use_router_prefix=False)
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="JSON router config file. Every option accepted on the command "
+        "line can be set here under its snake_case option name; command line "
+        "arguments still take precedence for scalar values.",
+    )
+    namespace = parse_with_config(parser, list(args))
+    return RouterArgs.from_cli_args(namespace, use_router_prefix=False)
 
 
 def main() -> None:

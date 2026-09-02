@@ -1,5 +1,7 @@
 use clap::{ArgAction, Parser, ValueEnum};
+use serde_json::Value;
 use std::collections::HashMap;
+use std::fs;
 use std::path::PathBuf;
 use vllm_router_rs::config::{
     CircuitBreakerConfig, ConfigError, ConfigResult, ConnectionMode, DiscoveryConfig,
@@ -10,10 +12,11 @@ use vllm_router_rs::metrics::PrometheusConfig;
 use vllm_router_rs::server::{self, ServerConfig};
 use vllm_router_rs::service_discovery::ServiceDiscoveryConfig;
 
+type PrefillUrls = Vec<(String, Option<u16>)>;
+
 // Helper function to parse prefill arguments from command line
 // Returns prefill_entries with (URL, optional_bootstrap_port)
-fn parse_prefill_args() -> Vec<(String, Option<u16>)> {
-    let args: Vec<String> = std::env::args().collect();
+fn parse_prefill_args_from(args: &[String]) -> PrefillUrls {
     let mut prefill_entries = Vec::new();
     let mut i = 0;
 
@@ -43,6 +46,168 @@ fn parse_prefill_args() -> Vec<(String, Option<u16>)> {
     }
 
     prefill_entries
+}
+
+fn config_path_from_args(args: &[String]) -> Option<String> {
+    for (i, arg) in args.iter().enumerate() {
+        if arg == "--config" {
+            return args.get(i + 1).cloned();
+        }
+        if let Some(value) = arg.strip_prefix("--config=") {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn raw_args_has_option(args: &[String], flag: &str) -> bool {
+    args.iter()
+        .any(|arg| arg == flag || arg.starts_with(&format!("{flag}=")))
+}
+
+/// Map canonical config keys (RouterArgs-style) to the native CLI long option.
+fn config_key_flag(key: &str) -> String {
+    let cli_name = match key {
+        // Dataclass-style aliases accepted in config files.
+        "decode_urls" => "decode",
+        "prefill_urls" => "prefill",
+        "eviction_interval_secs" => "eviction_interval",
+        other => other,
+    };
+    format!("--{}", cli_name.replace('_', "-"))
+}
+
+fn config_value_to_string(value: &Value) -> std::io::Result<String> {
+    match value {
+        Value::String(s) => Ok(s.clone()),
+        Value::Number(n) => Ok(n.to_string()),
+        Value::Bool(b) => Ok(b.to_string()),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "config values must be scalar or a list of scalars, got {}",
+                value
+            ),
+        )),
+    }
+}
+
+/// Convert a flat JSON config object into CLI-style tokens. Keys are
+/// snake_case option names (e.g. ``worker_urls``); values mirror what would be
+/// passed after the corresponding ``--option``. ``prefill`` accepts
+/// ``[["url", "9000"], ["url2"]]`` entries.
+fn config_to_cli_args(config_path: &str, cli_args: &[String]) -> std::io::Result<Vec<String>> {
+    let text = fs::read_to_string(config_path).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("cannot read config file '{config_path}': {e}"),
+        )
+    })?;
+    let root: Value = serde_json::from_str(&text).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid JSON in config file '{config_path}': {e}"),
+        )
+    })?;
+    let obj = root.as_object().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("config file '{config_path}' must contain a JSON object"),
+        )
+    })?;
+
+    let mut tokens = Vec::new();
+    for (key, value) in obj {
+        if key == "config" {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "'config' cannot be nested inside a config file",
+            ));
+        }
+        let flag = config_key_flag(key);
+        if key == "prefill" || key == "prefill_urls" {
+            if raw_args_has_option(cli_args, "--prefill") {
+                continue;
+            }
+            let entries = value.as_array().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "config option 'prefill' expects a list of [url, optional_port] entries",
+                )
+            })?;
+            for entry in entries {
+                tokens.push("--prefill".to_string());
+                if let Some(parts) = entry.as_array() {
+                    for part in parts {
+                        tokens.push(config_value_to_string(part)?);
+                    }
+                } else {
+                    tokens.push(config_value_to_string(entry)?);
+                }
+            }
+            continue;
+        }
+        // Explicit CLI flags win over the config file. Skipping duplicates is
+        // also required by clap, which rejects repeated scalar options.
+        if raw_args_has_option(cli_args, &flag) {
+            continue;
+        }
+
+        if let Value::Object(map) = value {
+            if !key.ends_with("selector") {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("config option '{key}' cannot be a JSON object"),
+                ));
+            }
+            for (selector_key, selector_value) in map {
+                tokens.push(flag.clone());
+                tokens.push(format!(
+                    "{}={}",
+                    selector_key,
+                    config_value_to_string(selector_value)?
+                ));
+            }
+            continue;
+        }
+
+        match value {
+            Value::Null => {}
+            Value::Bool(true) => tokens.push(flag),
+            Value::Bool(false) => {}
+            Value::Array(items) => {
+                for item in items {
+                    tokens.push(flag.clone());
+                    tokens.push(config_value_to_string(item)?);
+                }
+            }
+            scalar => {
+                tokens.push(flag);
+                tokens.push(config_value_to_string(scalar)?);
+            }
+        }
+    }
+    Ok(tokens)
+}
+
+fn filter_prefill_args(args: &[String]) -> Vec<String> {
+    let mut filtered: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--prefill" && i + 1 < args.len() {
+            i += 2;
+            if i < args.len()
+                && !args[i].starts_with("--")
+                && (args[i].parse::<u16>().is_ok() || args[i].to_lowercase() == "none")
+            {
+                i += 1;
+            }
+        } else {
+            filtered.push(args[i].clone());
+            i += 1;
+        }
+    }
+    filtered
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -116,6 +281,12 @@ struct CliArgs {
     /// {"extra_session_headers": ["x-my-session"], "fallback_to_first_user_prompt": true}
     #[arg(long)]
     hash_key_config: Option<PathBuf>,
+
+    /// JSON router config file. Every option accepted on the command line can
+    /// be set here under its snake_case option name. Command line arguments
+    /// still take precedence for scalar values.
+    #[arg(long)]
+    config: Option<PathBuf>,
 
     /// Enable vLLM PD (Prefill-Decode) disaggregated mode with vLLM-specific two-stage processing
     #[arg(long, default_value_t = false)]
@@ -345,6 +516,24 @@ struct CliArgs {
     /// KV connector type for PD disaggregation (nixl or mooncake)
     #[arg(long, value_enum, default_value_t = KvConnector::Nixl)]
     kv_connector: KvConnector,
+}
+
+/// Parse router CLI + (optionally) config file arguments into a `CliArgs` and
+/// the prefill URL list. Config file tokens are inserted before the real CLI
+/// tokens, so explicit command line scalars still win.
+fn parse_cli_and_prefill(raw_args: &[String]) -> std::io::Result<(CliArgs, PrefillUrls)> {
+    let mut combined_args = raw_args.to_vec();
+    if let Some(config_path) = config_path_from_args(raw_args) {
+        let config_tokens = config_to_cli_args(&config_path, raw_args)?;
+        // Keep argv[0] (binary name) first, then config tokens, then real CLI.
+        combined_args.splice(1..1, config_tokens);
+    }
+
+    let prefill_urls = parse_prefill_args_from(&combined_args);
+    let filtered_args = filter_prefill_args(&combined_args);
+    let cli_args = CliArgs::try_parse_from(filtered_args)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
+    Ok((cli_args, prefill_urls))
 }
 
 impl CliArgs {
@@ -645,40 +834,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
     println!("DEBUG: Main function started");
 
-    // Parse prefill arguments manually before clap parsing
-    println!("DEBUG: Parsing prefill arguments");
-    let prefill_urls = parse_prefill_args();
-    println!("DEBUG: Prefill URLs parsed: {:?}", prefill_urls);
-
-    // Filter out prefill arguments and their values before passing to clap
-    println!("DEBUG: Filtering CLI arguments");
-    let mut filtered_args: Vec<String> = Vec::new();
     let raw_args: Vec<String> = std::env::args().collect();
     println!("DEBUG: Raw args: {:?}", raw_args);
-    let mut i = 0;
-
-    while i < raw_args.len() {
-        if raw_args[i] == "--prefill" && i + 1 < raw_args.len() {
-            // Skip --prefill and its URL
-            i += 2;
-
-            // Also skip bootstrap port if present
-            if i < raw_args.len()
-                && !raw_args[i].starts_with("--")
-                && (raw_args[i].parse::<u16>().is_ok() || raw_args[i].to_lowercase() == "none")
-            {
-                i += 1;
-            }
-        } else {
-            filtered_args.push(raw_args[i].clone());
-            i += 1;
-        }
-    }
-
-    // Parse CLI arguments with clap using filtered args
-    println!("DEBUG: Parsing CLI arguments with clap");
-    println!("DEBUG: Filtered args: {:?}", filtered_args);
-    let cli_args = CliArgs::parse_from(filtered_args);
+    println!("DEBUG: Parsing CLI + config file arguments");
+    let (cli_args, prefill_urls) = parse_cli_and_prefill(&raw_args)?;
+    println!("DEBUG: Prefill URLs parsed: {:?}", prefill_urls);
     println!("DEBUG: CLI args parsed successfully");
     println!(
         "DEBUG: vllm_pd_disaggregation: {}",
@@ -800,5 +960,162 @@ mod tests {
             }
             other => panic!("expected consistent_hash, got {}", other.name()),
         }
+    }
+
+    fn write_json_config(dir: &std::path::Path, name: &str, body: &str) -> String {
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn test_full_config_file_sets_cli_options() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_json_config(
+            dir.path(),
+            "router.json",
+            r#"{
+                "host": "0.0.0.0",
+                "port": 30001,
+                "worker_urls": ["http://worker1:8000", "http://worker2:8000"],
+                "policy": "consistent_hash",
+                "retry_max_retries": 3,
+                "request_id_headers": ["x-session-id"],
+                "service_discovery": true,
+                "selector": {"app": "worker", "env": "prod"}
+            }"#,
+        );
+
+        let raw = vec![
+            "vllm-router".to_string(),
+            "--config".to_string(),
+            config_path,
+        ];
+        let (cli, _prefill) = parse_cli_and_prefill(&raw).unwrap();
+
+        assert_eq!(cli.host, "0.0.0.0");
+        assert_eq!(cli.port, 30001);
+        assert_eq!(
+            cli.worker_urls,
+            vec![
+                "http://worker1:8000".to_string(),
+                "http://worker2:8000".to_string()
+            ]
+        );
+        assert_eq!(cli.policy, "consistent_hash");
+        assert_eq!(cli.retry_max_retries, 3);
+        assert_eq!(cli.request_id_headers, vec!["x-session-id".to_string()]);
+        assert!(cli.service_discovery);
+        assert_eq!(
+            cli.selector,
+            vec!["app=worker".to_string(), "env=prod".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_config_file_pd_prefill_and_decode() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_json_config(
+            dir.path(),
+            "pd.json",
+            r#"{
+                "vllm_pd_disaggregation": true,
+                "prefill": [["http://prefill1:8000", "9000"], ["http://prefill2:8000"]],
+                "decode": ["http://decode1:8001", "http://decode2:8001"],
+                "prefill_policy": "consistent_hash",
+                "decode_policy": "consistent_hash"
+            }"#,
+        );
+
+        let raw = vec![
+            "vllm-router".to_string(),
+            "--config".to_string(),
+            config_path,
+        ];
+        let (cli, prefill_urls) = parse_cli_and_prefill(&raw).unwrap();
+
+        assert!(cli.vllm_pd_disaggregation);
+        assert_eq!(
+            prefill_urls,
+            vec![
+                ("http://prefill1:8000".to_string(), Some(9000)),
+                ("http://prefill2:8000".to_string(), None),
+            ]
+        );
+        assert_eq!(
+            cli.decode,
+            vec![
+                "http://decode1:8001".to_string(),
+                "http://decode2:8001".to_string()
+            ]
+        );
+        assert_eq!(cli.prefill_policy.as_deref(), Some("consistent_hash"));
+        assert_eq!(cli.decode_policy.as_deref(), Some("consistent_hash"));
+    }
+
+    #[test]
+    fn test_cli_arguments_override_config_scalars() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_json_config(
+            dir.path(),
+            "override.json",
+            r#"{
+                "host": "1.2.3.4",
+                "port": 30001,
+                "worker_urls": ["http://worker1:8000"]
+            }"#,
+        );
+
+        let raw = vec![
+            "vllm-router".to_string(),
+            "--config".to_string(),
+            config_path,
+            "--host".to_string(),
+            "9.9.9.9".to_string(),
+            "--port".to_string(),
+            "31111".to_string(),
+        ];
+        let (cli, _) = parse_cli_and_prefill(&raw).unwrap();
+        assert_eq!(cli.host, "9.9.9.9");
+        assert_eq!(cli.port, 31111);
+        // Config list values are used when no CLI value is supplied.
+        assert_eq!(cli.worker_urls, vec!["http://worker1:8000".to_string()]);
+    }
+
+    #[test]
+    fn test_unknown_config_option_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_json_config(dir.path(), "bad.json", r#"{"not_an_option": 1}"#);
+        let raw = vec![
+            "vllm-router".to_string(),
+            "--config".to_string(),
+            config_path,
+        ];
+        let result = parse_cli_and_prefill(&raw);
+        assert!(
+            result.is_err(),
+            "unknown config option should fail clap parse"
+        );
+    }
+
+    #[test]
+    fn test_native_example_config_parses() {
+        let example = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/configs/router_config.native.example.json");
+        let raw = vec![
+            "vllm-router".to_string(),
+            "--config".to_string(),
+            example.to_string_lossy().into_owned(),
+        ];
+        let (cli, prefill_urls) = parse_cli_and_prefill(&raw).unwrap();
+
+        assert_eq!(cli.host, "127.0.0.1");
+        assert_eq!(cli.port, 30000);
+        assert_eq!(cli.policy, "consistent_hash");
+        assert_eq!(cli.backend, Backend::Vllm);
+        assert_eq!(cli.retry_max_retries, 5);
+        assert_eq!(cli.otel_sampling_ratio, 1.0);
+        assert!(cli.hash_key_config.is_some());
+        assert!(prefill_urls.is_empty());
     }
 }
