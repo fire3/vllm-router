@@ -151,6 +151,10 @@ vllm-router \
 在途席位，而不会在压力大时被 router 主动以 408 掐断，避免 agent 客户端进入
 “超时-重试-再超时”循环。配置正数才会在排队超时后返回 408（仅作兜底）。
 
+可选地，在 `hash_key_config` JSON 里把 `new_session_strategy` 设为 `min_load`，
+新会话的第一跳会从 hash ring 相邻的候选 worker 中挑最闲的一台并记录 pin（后续
+续轮固定在该 worker，保住 KV locality）；老会话命中 pin 后不会被负载挤走。
+
 See [Consistent hash QoS queuing](consistent_hash_qos.md) for design,
 configuration, metrics and tuning guidance.
 

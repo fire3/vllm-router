@@ -1,7 +1,8 @@
 use crate::config::types::RetryConfig;
 use crate::core::{
     is_retryable_status, AdmissionReject, BasicWorker, CircuitBreakerConfig, DPAwareWorker,
-    HealthConfig, RetryExecutor, Worker, WorkerRegistry, WorkerSlotPermit, WorkerType,
+    HealthConfig, RetryExecutor, Worker, WorkerAdmissionStats, WorkerRegistry, WorkerSlotPermit,
+    WorkerType,
 };
 use crate::metrics::RouterMetrics;
 use crate::otel_http::{self, ClientRequestOptions};
@@ -533,7 +534,23 @@ impl Router {
         // Convert headers for policies that need them (e.g., consistent_hash)
         let request_headers = Self::headers_to_request_headers(headers);
 
-        let idx = policy.select_worker_with_headers(&available, text, request_headers.as_ref())?;
+        // Snapshot the per-worker admission gate so load-aware policies can
+        // place new sessions on the least loaded worker.
+        let admission_stats: HashMap<String, WorkerAdmissionStats> = available
+            .iter()
+            .map(|w| {
+                (
+                    w.url().to_string(),
+                    self.worker_registry.admission_stats(w.url()),
+                )
+            })
+            .collect();
+        let idx = policy.select_worker_with_headers_and_stats(
+            &available,
+            text,
+            request_headers.as_ref(),
+            Some(&admission_stats),
+        )?;
         Some(available[idx].clone())
     }
 
@@ -589,7 +606,7 @@ impl Router {
                     None => self.policy_registry.get_default_policy(),
                 };
 
-                let load_incremented = if policy.name() == "cache_aware" {
+                let load_incremented = if policy.tracks_request_load() {
                     worker.increment_load();
                     RouterMetrics::set_running_requests(worker.url(), worker.load());
                     true
@@ -1708,10 +1725,20 @@ impl RouterTrait for Router {
         let policy = self.policy_registry.get_default_policy();
         let request_text = serde_json::to_string(&body).ok();
         let request_headers = Self::headers_to_request_headers(headers);
-        let worker_idx = match policy.select_worker_with_headers(
+        let admission_stats: HashMap<String, WorkerAdmissionStats> = workers
+            .iter()
+            .map(|w| {
+                (
+                    w.url().to_string(),
+                    self.worker_registry.admission_stats(w.url()),
+                )
+            })
+            .collect();
+        let worker_idx = match policy.select_worker_with_headers_and_stats(
             &workers,
             request_text.as_deref(),
             request_headers.as_ref(),
+            Some(&admission_stats),
         ) {
             Some(idx) => idx,
             None => {

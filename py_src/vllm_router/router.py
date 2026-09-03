@@ -81,7 +81,10 @@ class Router:
         hash_key_config: Optional JSON config file for session-affinity / hash-key
             extraction (only applied when policy is consistent_hash). Lets you add
             extra session header names, disable body extraction, or disable the
-            first-user-prompt fallback. Default: None (built-in defaults).
+            first-user-prompt fallback, and configure `min_load` placement for
+            new sessions (`new_session_strategy`, `placement_candidates`,
+            `session_pin_ttl_secs`, `max_session_pins`).
+            Default: None (built-in defaults).
         bootstrap_port_annotation: Kubernetes annotation name for bootstrap port (PD mode).
             Default: 'vllm.ai/bootstrap-port'
         request_timeout_secs: Request timeout in seconds. Default: 600

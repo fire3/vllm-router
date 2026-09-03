@@ -14,11 +14,35 @@
 //! The configuration below is loaded from a JSON file and attached to
 //! `PolicyConfig::ConsistentHash`. When no file is supplied the router uses
 //! the built-in defaults from `src/policies/hash_key.rs`.
+//!
+//! The same file also configures **session placement**: whether brand-new
+//! sessions are placed by the pure hash ring (`ring`) or sampled across
+//! ring neighbors by real-time load (`min_load`) and then pinned, so later
+//! turns of the same agent conversation keep KV locality.
 
 use crate::config::ConfigResult;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
+
+/// How a brand-new session (no recorded pin yet) should pick its worker.
+///
+/// `Ring` keeps the historical behavior: the consistent-hash ring alone
+/// decides. `MinLoad` samples `placement_candidates` ring neighbors and picks
+/// the least loaded one, then pins the session so later turns keep KV
+/// locality even though the first placement may have deviated from the ring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ConsistentHashNewSessionStrategy {
+    /// Historical behavior: pure consistent-hash placement.
+    #[default]
+    #[serde(rename = "ring")]
+    Ring,
+
+    /// New sessions pick the least loaded of K ring neighbors and are pinned.
+    #[serde(rename = "min_load")]
+    MinLoad,
+}
 
 /// Configuration for session-aware hash key extraction.
 ///
@@ -50,6 +74,19 @@ pub struct SessionAffinityConfig {
     /// would break affinity; the first user prompt is the most stable anchor
     /// available without client cooperation.
     pub fallback_to_first_user_prompt: bool,
+
+    /// Placement rule for sessions with no recorded pin yet.
+    pub new_session_strategy: ConsistentHashNewSessionStrategy,
+
+    /// How many distinct ring neighbors to sample for `min_load` placement.
+    pub placement_candidates: usize,
+
+    /// How long a session pin is considered valid (seconds).
+    /// `0` means pins never expire (until worker set changes or eviction).
+    pub session_pin_ttl_secs: u64,
+
+    /// Maximum number of remembered session pins (bounds memory).
+    pub max_session_pins: usize,
 }
 
 impl Default for SessionAffinityConfig {
@@ -59,6 +96,10 @@ impl Default for SessionAffinityConfig {
             extra_session_headers: Vec::new(),
             use_body_session_fields: true,
             fallback_to_first_user_prompt: true,
+            new_session_strategy: ConsistentHashNewSessionStrategy::Ring,
+            placement_candidates: 2,
+            session_pin_ttl_secs: 24 * 60 * 60, // 24h
+            max_session_pins: 100_000,
         }
     }
 }
@@ -83,6 +124,7 @@ impl SessionAffinityConfig {
 
 #[cfg(test)]
 mod tests {
+    use super::ConsistentHashNewSessionStrategy;
     use crate::config::{PolicyConfig, SessionAffinityConfig};
     use std::fs;
 
@@ -93,6 +135,13 @@ mod tests {
         assert!(config.extra_session_headers.is_empty());
         assert!(config.use_body_session_fields);
         assert!(config.fallback_to_first_user_prompt);
+        assert_eq!(
+            config.new_session_strategy,
+            ConsistentHashNewSessionStrategy::Ring
+        );
+        assert_eq!(config.placement_candidates, 2);
+        assert_eq!(config.session_pin_ttl_secs, 24 * 60 * 60);
+        assert_eq!(config.max_session_pins, 100_000);
     }
 
     #[test]
@@ -103,6 +152,31 @@ mod tests {
         assert_eq!(config.extra_session_headers, vec!["x-my-session"]);
         assert!(config.use_body_session_fields);
         assert!(config.fallback_to_first_user_prompt);
+        assert_eq!(
+            config.new_session_strategy,
+            ConsistentHashNewSessionStrategy::Ring
+        );
+        assert_eq!(config.max_session_pins, 100_000);
+    }
+
+    #[test]
+    fn test_deserialize_session_placement_config() {
+        let config: SessionAffinityConfig = serde_json::from_str(
+            r#"{
+                "new_session_strategy": "min_load",
+                "placement_candidates": 3,
+                "session_pin_ttl_secs": 7200,
+                "max_session_pins": 50
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.new_session_strategy,
+            ConsistentHashNewSessionStrategy::MinLoad
+        );
+        assert_eq!(config.placement_candidates, 3);
+        assert_eq!(config.session_pin_ttl_secs, 7200);
+        assert_eq!(config.max_session_pins, 50);
     }
 
     #[test]

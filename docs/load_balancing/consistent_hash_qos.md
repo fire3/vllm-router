@@ -23,7 +23,11 @@ per-worker admission gate 弥补这两个缺口。
 NewAPI
   └─ vllm-router (consistent_hash)
       1) 提取 session key（header / body / first-user-prompt）
-      2) consistent hash 选定 worker（不破坏 KV locality）
+      2) 选 worker
+           ├─ 老会话（有 pin）      → 固定在原 worker，保持 KV locality
+           └─ 新会话（无 pin）      → min_load 策略：从 hash ring 相邻的
+                                      placement_candidates 个候选里挑最闲的，
+                                      并记录 pin（保证后续轮次不漂移）
       3) 向该 worker 申请“在途席位”
            ├─ 未满  → 立刻转发
            └─ 满    → 进入该 worker 的有界队列（最多 worker_queue_size 个）
@@ -33,8 +37,16 @@ NewAPI
 
 关键性质：
 
-- **先选路，后限流**：排队不改变 consistent hash 的映射。worker 忙时请求等待这台
-  worker，而不是 fallback 到别的 worker 丢掉 KV cache。
+- **两段式选路**：续轮会话命中 pin 后固定在原 worker，排队不会把它挤到别的
+  worker 丢掉 KV cache；只有**新会话的第一跳**才做负载感知的首跳，避免新请求
+  一进来就压进已经饱和的 worker。
+- **min_load 只看真实在途**：首跳使用 admission gate 的
+  `inflight + queued`（已精确到 SSE `[DONE]`/流结束）作为负载信号，而不是旧的
+  `worker.load()` 计数器。旧计数器只在 gate 关闭时作为兜底。
+- **pin 生命周期**：pin 有界（`max_session_pins`）并带 TTL（`session_pin_ttl_secs`）；
+  pin 的 worker 下线/熔断后 pin 失效并重新按 min_load 落地。
+- **先选路，后限流**：无论新老会话，选完后都在该 worker 前面排队，不会 fallback
+  到别的 worker 重新挤占。
 - **在途计数覆盖完整生命周期**：streaming 请求的席位要等 `[DONE]` / 流结束 /
   通道断开才释放，和 `send_typed_request` 中 worker load 的释放点一致。
 - **每个 worker 独立排队**：一台 worker 满不会堵住其他空闲 worker。
@@ -77,7 +89,30 @@ JSON 配置文件：
 完整示例见
 `examples/configs/consistent_hash_qos_config.example.json`。
 
-选项说明：
+### 会话选路配置（写在 `hash_key_config` 指向的 JSON 里）
+
+```json
+{
+  "session_headers": ["x-session-id", "x-claude-code-session-id"],
+  "use_body_session_fields": true,
+  "fallback_to_first_user_prompt": true,
+  "new_session_strategy": "min_load",
+  "placement_candidates": 2,
+  "session_pin_ttl_secs": 86400,
+  "max_session_pins": 100000
+}
+```
+
+会话选路选项：
+
+| 选项 | 默认 | 说明 |
+|---|---|---|
+| `new_session_strategy` | `ring` | `ring` = 纯 consistent hash（老行为）；`min_load` = 新会话在候选 worker 里挑最闲的并 pin |
+| `placement_candidates` | `2` | min_load 时从 hash ring 当前位置向后采样的候选 worker 数 |
+| `session_pin_ttl_secs` | `86400` | pin 有效期（秒）；`0` = 不自动过期 |
+| `max_session_pins` | `100000` | pin 表容量上限（FIFO 淘汰）；`0` = 不启用 pin |
+
+worker 门禁选项：
 
 | 选项 | 默认 | 说明 |
 |---|---|---|
@@ -120,6 +155,9 @@ curl -s http://worker:8000/metrics | grep '^vllm:num_requests_waiting'
 - `vllm_router_worker_admission_rejects_total{worker,reason}`：
   `queue_full` / `queue_timeout` 计数（`queue_timeout_secs=0` 时不会有
   `queue_timeout` 计数）
+- `vllm_router_consistent_hash_pin_hits_total{worker}`：续轮会话命中 pin 的次数
+- `vllm_router_consistent_hash_pin_placements_total{worker}`：新会话完成
+  min_load 首跳并写入 pin 的次数
 
 配合 vLLM 侧的 `vllm:num_requests_running` 和 TPOT/TTFT，可以确认门禁是否把
 running 压到了目标区间。
@@ -134,8 +172,9 @@ running 压到了目标区间。
   建议把全局 `max_concurrent_requests` 保持在明显高于 `worker 数 ×
   max_concurrent_requests_per_worker` 的水平，否则请求会在选路前就被全局闸
   拒绝/排队。
-- 这是 router 侧的第一版 per-worker 排队（FIFO 有界队列）。同一会话的
-  续轮优先级、per-session 并发上限可以作为下一步扩展；当前仍能保证新请求
-  不会直接压进一台满载 worker。
+- min_load 首跳只在 `new_session_strategy: "min_load"` 时启用，且需要配合
+  `max_concurrent_requests_per_worker` 使用（否则退化为旧的 `worker.load()`
+  计数，未开启时该计数在 consistent_hash 下不维护）。当前 pin 表是进程内存态，
+  router 重启后新会话重新首跳；续轮会退回到纯 ring 目标。
 - 目前 PD 模式（prefill/decode disaggregation）还没有接入这个门禁，它面向
   regular / consistent_hash 模式。

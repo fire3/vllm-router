@@ -25,6 +25,6 @@ pub use worker::{
     Worker, WorkerCollection, WorkerFactory, WorkerLoadGuard, WorkerType,
 };
 pub use worker_admission::{
-    AdmissionReject, WorkerAdmission, WorkerAdmissionConfig, WorkerSlotPermit,
+    AdmissionReject, WorkerAdmission, WorkerAdmissionConfig, WorkerAdmissionStats, WorkerSlotPermit,
 };
 pub use worker_registry::{WorkerId, WorkerRegistry, WorkerRegistryStats};

@@ -10,7 +10,7 @@
 
   "policy": "consistent_hash",
 
-  "hash_key_config": "examples/configs/consistent_hash_session_config.full.json",
+  "hash_key_config": "examples/configs/consistent_hash_session_config.min_load.json",
 
   "max_concurrent_requests_per_worker": 24,
   "worker_queue_size": 100,

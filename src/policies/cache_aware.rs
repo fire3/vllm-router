@@ -361,6 +361,10 @@ impl LoadBalancingPolicy for CacheAwarePolicy {
         "cache_aware"
     }
 
+    fn tracks_request_load(&self) -> bool {
+        true
+    }
+
     fn needs_request_text(&self) -> bool {
         true // Cache-aware policy needs request text for cache affinity
     }

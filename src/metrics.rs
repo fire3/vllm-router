@@ -521,6 +521,22 @@ impl RouterMetrics {
         .increment(1);
     }
 
+    pub fn record_ch_pin_hit(worker: &str) {
+        counter!(
+            "vllm_router_consistent_hash_pin_hits_total",
+            "worker" => worker.to_string()
+        )
+        .increment(1);
+    }
+
+    pub fn record_ch_pin_placement(worker: &str) {
+        counter!(
+            "vllm_router_consistent_hash_pin_placements_total",
+            "worker" => worker.to_string()
+        )
+        .increment(1);
+    }
+
     // Circuit breaker metrics
     pub fn set_cb_state(worker: &str, state_code: u8) {
         gauge!("vllm_router_cb_state",

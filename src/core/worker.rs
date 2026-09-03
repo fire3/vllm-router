@@ -908,12 +908,12 @@ pub fn start_health_checker(
                 }
             };
 
-            // Periodically reset load counters to prevent drift
-            // Only do this when we believe all workers should be idle
+            // Periodically reset load counters to prevent drift, but only when
+            // every worker is fully idle. Resetting while a long-running
+            // stream is still being served would corrupt load-aware routing.
             if check_count.is_multiple_of(LOAD_RESET_INTERVAL) {
                 let max_load = workers_to_check.iter().map(|w| w.load()).max().unwrap_or(0);
-                // Only reset if load appears to be very low (likely drift)
-                if max_load <= 2 {
+                if max_load == 0 {
                     tracing::debug!(
                         "Resetting load counters to prevent drift (max_load: {})",
                         max_load

@@ -75,6 +75,23 @@ impl AdmissionReject {
     }
 }
 
+/// Snapshot of the per-worker admission gate used by load-aware routing.
+///
+/// `enabled` is false when the per-worker gate is not configured; in that
+/// case `inflight`/`queued`/`max_inflight` are all zero and policies should
+/// fall back to the legacy `worker.load()` counter.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorkerAdmissionStats {
+    /// Whether the per-worker gate is enabled for this worker.
+    pub enabled: bool,
+    /// Requests currently being served (held until body/SSE stream ends).
+    pub inflight: usize,
+    /// Requests currently waiting in this worker's queue.
+    pub queued: usize,
+    /// `max_concurrent_requests_per_worker` for this worker.
+    pub max_inflight: usize,
+}
+
 /// Shared per-worker state.
 struct WorkerLimits {
     worker_url: String,
@@ -183,6 +200,17 @@ impl WorkerLimits {
             self.queued.load(Ordering::Relaxed),
         );
     }
+
+    fn stats(&self) -> WorkerAdmissionStats {
+        WorkerAdmissionStats {
+            enabled: true,
+            inflight: self
+                .max_inflight
+                .saturating_sub(self.inflight.available_permits()),
+            queued: self.queued.load(Ordering::Relaxed),
+            max_inflight: self.max_inflight,
+        }
+    }
 }
 
 /// RAII guard that keeps the queued gauge accurate even when a waiter is
@@ -279,6 +307,27 @@ impl WorkerAdmission {
         limits.acquire().await.map(Some)
     }
 
+    /// Snapshot the admission state for a worker URL.
+    ///
+    /// Returns an empty, disabled snapshot when the gate itself is disabled.
+    /// When the gate is enabled but the worker has not been seen yet, returns
+    /// an enabled snapshot with zero load so policies can route to it.
+    pub fn stats(&self, worker_url: &str) -> WorkerAdmissionStats {
+        let max_inflight = match self.config.max_concurrent_requests_per_worker {
+            Some(max) if max > 0 => max,
+            _ => return WorkerAdmissionStats::default(),
+        };
+
+        match self.limits.get(worker_url) {
+            Some(limits) => limits.stats(),
+            None => WorkerAdmissionStats {
+                enabled: true,
+                max_inflight,
+                ..WorkerAdmissionStats::default()
+            },
+        }
+    }
+
     /// Drop the per-worker limit state when a worker is removed.
     pub fn remove_worker(&self, worker_url: &str) {
         self.limits.remove(worker_url);
@@ -303,6 +352,10 @@ mod tests {
         let admission = WorkerAdmission::new(config(None, 1, 1000));
         let permit = admission.acquire("http://w1:8000").await.unwrap();
         assert!(permit.is_none());
+        assert_eq!(
+            admission.stats("http://w1:8000"),
+            WorkerAdmissionStats::default()
+        );
     }
 
     #[tokio::test]
@@ -395,6 +448,50 @@ mod tests {
 
         drop(first);
         second.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stats_reflect_inflight_and_queued_requests() {
+        let admission = WorkerAdmission::new(config(Some(1), 1, 5000));
+        let expected_idle = WorkerAdmissionStats {
+            enabled: true,
+            inflight: 0,
+            queued: 0,
+            max_inflight: 1,
+        };
+        assert_eq!(admission.stats("http://w1:8000"), expected_idle);
+
+        let first = admission
+            .acquire("http://w1:8000")
+            .await
+            .unwrap()
+            .expect("first permit");
+        let after_first = admission.stats("http://w1:8000");
+        assert_eq!(after_first.inflight, 1);
+        assert_eq!(after_first.queued, 0);
+
+        let admission_clone = admission.clone();
+        let second = tokio::spawn(async move {
+            admission_clone
+                .acquire("http://w1:8000")
+                .await
+                .unwrap()
+                .expect("second permit")
+        });
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let queued = admission.stats("http://w1:8000");
+        assert_eq!(queued.inflight, 1);
+        assert_eq!(queued.queued, 1);
+
+        drop(first);
+        let second_permit = second.await.unwrap();
+        let after_second = admission.stats("http://w1:8000");
+        assert_eq!(after_second.inflight, 1);
+        assert_eq!(after_second.queued, 0);
+
+        drop(second_permit);
+        assert_eq!(admission.stats("http://w1:8000"), expected_idle);
     }
 
     #[tokio::test]

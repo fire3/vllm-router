@@ -4,8 +4,9 @@
 //! session ID or user ID, ensuring that requests from the same user/session are
 //! consistently routed to the same worker for better cache locality.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use tracing::debug;
 use tracing::info;
@@ -14,8 +15,8 @@ use super::get_healthy_worker_indices;
 use super::hash_key;
 use super::LoadBalancingPolicy;
 use super::RequestHeaders;
-use crate::config::SessionAffinityConfig;
-use crate::core::Worker;
+use crate::config::{ConsistentHashNewSessionStrategy, SessionAffinityConfig};
+use crate::core::{Worker, WorkerAdmissionStats};
 use crate::metrics::RouterMetrics;
 
 /// Number of virtual nodes per physical worker (for better load distribution)
@@ -33,6 +34,17 @@ pub struct ConsistentHashPolicy {
     current_workers: RwLock<Vec<String>>,
     /// Session-affinity / hash-key extraction configuration
     session_config: SessionAffinityConfig,
+    /// First-placement memory: hash key -> pinned worker.
+    session_pins: RwLock<HashMap<String, SessionPin>>,
+    /// Insertion order of pins (FIFO eviction when the cap is exceeded).
+    pin_order: RwLock<VecDeque<String>>,
+}
+
+/// A remembered session -> worker placement.
+#[derive(Debug, Clone)]
+struct SessionPin {
+    worker_url: String,
+    pinned_at: Instant,
 }
 
 impl ConsistentHashPolicy {
@@ -46,6 +58,8 @@ impl ConsistentHashPolicy {
             hash_ring: RwLock::new(BTreeMap::new()),
             current_workers: RwLock::new(Vec::new()),
             session_config,
+            session_pins: RwLock::new(HashMap::new()),
+            pin_order: RwLock::new(VecDeque::new()),
         }
     }
 
@@ -327,6 +341,310 @@ impl ConsistentHashPolicy {
         selected_worker
     }
 
+    /// Record a policy decision and processed request for a healthy index.
+    fn record_selection(&self, workers: &[Arc<dyn Worker>], idx: usize) -> Option<usize> {
+        workers[idx].increment_processed();
+        let worker_url = workers[idx].url();
+        RouterMetrics::record_processed_request(worker_url);
+        RouterMetrics::record_policy_decision(self.name(), worker_url);
+        Some(idx)
+    }
+
+    /// Find the index of `target_url` in `workers`, honoring DP `@rank`
+    /// suffixes the same way legacy routing did.
+    fn find_worker_index(&self, workers: &[Arc<dyn Worker>], target_url: &str) -> Option<usize> {
+        let (base_url, dp_rank) = self.extract_dp_info(target_url);
+        if dp_rank.is_some() {
+            workers.iter().position(|w| w.url() == target_url)
+        } else {
+            workers.iter().position(|w| {
+                let (worker_base_url, _) = self.extract_dp_info(w.url());
+                worker_base_url == base_url
+            })
+        }
+    }
+
+    /// Collect up to `k` distinct worker URLs starting at this key's position
+    /// on the hash ring. The first element is the classic ring target, so a
+    /// load-aware tie between candidates still prefers the pure-ring choice.
+    fn ring_candidates(&self, hash_key: &str, k: usize) -> Vec<String> {
+        let k = k.max(1);
+        let hash_value = Self::fbi_hash(hash_key);
+        let ring = self.hash_ring.read().unwrap();
+        if ring.is_empty() {
+            return Vec::new();
+        }
+
+        let mut seen = HashSet::new();
+        let mut candidates = Vec::new();
+
+        for (_, worker_url) in ring.range(hash_value..) {
+            if seen.insert(worker_url.clone()) {
+                candidates.push(worker_url.clone());
+                if candidates.len() >= k {
+                    return candidates;
+                }
+            }
+        }
+        // Wrap around if fewer than k distinct workers appeared after the key.
+        for (_, worker_url) in ring.iter() {
+            if seen.insert(worker_url.clone()) {
+                candidates.push(worker_url.clone());
+                if candidates.len() >= k {
+                    break;
+                }
+            }
+        }
+        candidates
+    }
+
+    /// Remember a session's first placement. Per-request fallback keys
+    /// (`request_hash:` / `request:`) are not stable across turns and are not
+    /// pinned.
+    fn put_session_pin(&self, hash_key: &str, worker_url: &str) -> bool {
+        if hash_key.starts_with("request_hash:") || hash_key.starts_with("request:") {
+            return false;
+        }
+        let max_pins = self.session_config.max_session_pins;
+        if max_pins == 0 {
+            return false;
+        }
+
+        let mut pins = self.session_pins.write().unwrap();
+        let mut order = self.pin_order.write().unwrap();
+        if pins.contains_key(hash_key) {
+            // Refresh the existing pin without changing its eviction order.
+            pins.insert(
+                hash_key.to_string(),
+                SessionPin {
+                    worker_url: worker_url.to_string(),
+                    pinned_at: Instant::now(),
+                },
+            );
+            return true;
+        }
+
+        pins.insert(
+            hash_key.to_string(),
+            SessionPin {
+                worker_url: worker_url.to_string(),
+                pinned_at: Instant::now(),
+            },
+        );
+        order.push_back(hash_key.to_string());
+
+        // Bound memory: evict oldest pins when the cap is exceeded.
+        while pins.len() > max_pins {
+            match order.pop_front() {
+                Some(evicted) => {
+                    pins.remove(&evicted);
+                }
+                None => break,
+            }
+        }
+        // Expired/stale keys may still sit in the FIFO after being removed
+        // from the map; compact occasionally so the order list stays bounded.
+        if order.len() > pins.len().saturating_mul(2).max(64) {
+            *order = pins.keys().cloned().collect();
+        }
+        true
+    }
+
+    /// Return the pinned worker index if the pin exists, is unexpired, and
+    /// still points at a healthy worker.
+    fn get_valid_pin(&self, hash_key: &str, workers: &[Arc<dyn Worker>]) -> Option<usize> {
+        let mut pins = self.session_pins.write().unwrap();
+        let pin = pins.get(hash_key)?;
+
+        let ttl_secs = self.session_config.session_pin_ttl_secs;
+        let expired = ttl_secs > 0 && pin.pinned_at.elapsed() >= Duration::from_secs(ttl_secs);
+        if expired {
+            pins.remove(hash_key);
+            return None;
+        }
+
+        let idx = self.find_worker_index(workers, &pin.worker_url)?;
+        if workers[idx].is_healthy() && workers[idx].circuit_breaker().can_execute() {
+            Some(idx)
+        } else {
+            // Worker disappeared or became unhealthy: drop the stale pin so
+            // the next request performs a fresh placement.
+            pins.remove(hash_key);
+            None
+        }
+    }
+
+    /// Effective load used for min-load placement.
+    ///
+    /// Prefers the admission gate snapshot (inflight + queued, held until
+    /// stream end). Falls back to the legacy `worker.load()` counter when the
+    /// gate is disabled or the snapshot is absent.
+    fn effective_load(
+        &self,
+        worker: &Arc<dyn Worker>,
+        stats: Option<&HashMap<String, WorkerAdmissionStats>>,
+    ) -> f64 {
+        if let Some(stats) = stats {
+            if let Some(s) = stats.get(worker.url()) {
+                if s.enabled {
+                    let capacity = s.max_inflight.max(1) as f64;
+                    return ((s.inflight + s.queued) as f64) / capacity;
+                }
+            }
+        }
+        worker.load() as f64
+    }
+
+    /// Choose the least loaded worker from the ring candidates for a new
+    /// session (no pin yet).
+    fn select_min_load_placement(
+        &self,
+        workers: &[Arc<dyn Worker>],
+        healthy_indices: &[usize],
+        hash_key: &str,
+        stats: Option<&HashMap<String, WorkerAdmissionStats>>,
+    ) -> Option<usize> {
+        let candidates =
+            self.ring_candidates(hash_key, self.session_config.placement_candidates.max(1));
+        debug!("consistent_hash min_load: key candidates={:?}", candidates);
+
+        // Candidates that are present and healthy.
+        let mut candidate_indices: Vec<usize> = candidates
+            .iter()
+            .filter_map(|url| self.find_worker_index(workers, url))
+            .filter(|idx| healthy_indices.contains(idx))
+            .collect();
+
+        if candidate_indices.is_empty() {
+            // Should not happen with a healthy ring, but stay safe.
+            candidate_indices = healthy_indices.to_vec();
+        }
+
+        let selected = candidate_indices.into_iter().min_by(|&a, &b| {
+            let la = self.effective_load(&workers[a], stats);
+            let lb = self.effective_load(&workers[b], stats);
+            la.total_cmp(&lb)
+        })?;
+
+        // Remember first placement so later turns keep KV locality even when
+        // the load-aware choice differs from the pure-ring target.
+        if self.put_session_pin(hash_key, workers[selected].url()) {
+            RouterMetrics::record_ch_pin_placement(workers[selected].url());
+        }
+        Some(selected)
+    }
+
+    /// Full selection logic shared by the legacy and the load-aware entry
+    /// points. `stats` carries real-time admission snapshots from the router.
+    fn select_worker_inner(
+        &self,
+        workers: &[Arc<dyn Worker>],
+        request_text: Option<&str>,
+        headers: Option<&RequestHeaders>,
+        stats: Option<&HashMap<String, WorkerAdmissionStats>>,
+    ) -> Option<usize> {
+        let healthy_indices = get_healthy_worker_indices(workers);
+        if healthy_indices.is_empty() {
+            return None;
+        }
+
+        // Update hash ring if needed
+        self.update_hash_ring(workers);
+
+        // Extract hash key with priority: headers > body > fallback
+        let hash_key =
+            hash_key::extract_hash_key_with_config(request_text, headers, &self.session_config);
+
+        if let Some(text) = request_text {
+            debug!("CONSISTENT_HASH_DEBUG: Request text length: {}", text.len());
+        }
+        if let Some(hdrs) = headers {
+            debug!(
+                "CONSISTENT_HASH_DEBUG: Headers available: {:?}",
+                hdrs.keys().collect::<Vec<_>>()
+            );
+        }
+        info!("CONSISTENT_HASH_DEBUG: Extracted hash key: {}", hash_key);
+
+        if self.session_config.new_session_strategy == ConsistentHashNewSessionStrategy::MinLoad {
+            // Existing session with a live pin: keep affinity regardless of
+            // who currently has the lowest load.
+            if let Some(idx) = self.get_valid_pin(&hash_key, workers) {
+                debug!(
+                    "Consistent hash pin hit: key='{}' -> worker='{}'",
+                    hash_key,
+                    workers[idx].url()
+                );
+                RouterMetrics::record_ch_pin_hit(workers[idx].url());
+                return self.record_selection(workers, idx);
+            }
+
+            let selected =
+                self.select_min_load_placement(workers, &healthy_indices, &hash_key, stats)?;
+            let worker_url = workers[selected].url();
+            info!(
+                "Consistent hash min-load placement: key='{}' -> worker='{}' (index={})",
+                hash_key, worker_url, selected
+            );
+            return self.record_selection(workers, selected);
+        }
+
+        // Legacy pure-ring path (unchanged semantics).
+        let target_worker_url = match self.find_worker_by_hash(&hash_key) {
+            Some(url) => {
+                info!(
+                    "CONSISTENT_HASH_DEBUG: Hash key '{}' mapped to worker: {}",
+                    hash_key, url
+                );
+                url
+            }
+            None => {
+                // Fallback to first healthy worker if hash ring is empty
+                let fallback_idx = healthy_indices[0];
+                let worker_url = workers[fallback_idx].url();
+                info!(
+                    "CONSISTENT_HASH_DEBUG: Hash ring empty, falling back to worker: {}",
+                    worker_url
+                );
+                return self.record_selection(workers, fallback_idx);
+            }
+        };
+
+        match self.find_worker_index(workers, &target_worker_url) {
+            Some(idx) => {
+                if workers[idx].is_healthy() && workers[idx].circuit_breaker().can_execute() {
+                    debug!(
+                        "CONSISTENT_HASH_DEBUG: Selected worker at index {}: {}",
+                        idx,
+                        workers[idx].url()
+                    );
+                    info!(
+                        "Consistent hash routing: key='{}' -> worker='{}' (index={})",
+                        hash_key,
+                        workers[idx].url(),
+                        idx
+                    );
+                    self.record_selection(workers, idx)
+                } else {
+                    debug!(
+                        "Target worker '{}' is unhealthy, falling back to healthy worker",
+                        workers[idx].url()
+                    );
+                    let fallback_idx = healthy_indices[0];
+                    self.record_selection(workers, fallback_idx)
+                }
+            }
+            None => {
+                debug!(
+                    "Target worker '{}' not found in current worker set, falling back",
+                    target_worker_url
+                );
+                let fallback_idx = healthy_indices[0];
+                self.record_selection(workers, fallback_idx)
+            }
+        }
+    }
+
     /// Handle DP-aware routing by extracting DP rank from worker URL
     fn extract_dp_info(&self, worker_url: &str) -> (String, Option<usize>) {
         if worker_url.contains('@') {
@@ -348,126 +666,24 @@ impl LoadBalancingPolicy for ConsistentHashPolicy {
         request_text: Option<&str>,
         headers: Option<&RequestHeaders>,
     ) -> Option<usize> {
-        let healthy_indices = get_healthy_worker_indices(workers);
+        self.select_worker_inner(workers, request_text, headers, None)
+    }
 
-        if healthy_indices.is_empty() {
-            return None;
-        }
+    fn select_worker_with_headers_and_stats(
+        &self,
+        workers: &[Arc<dyn Worker>],
+        request_text: Option<&str>,
+        headers: Option<&RequestHeaders>,
+        stats: Option<&HashMap<String, WorkerAdmissionStats>>,
+    ) -> Option<usize> {
+        self.select_worker_inner(workers, request_text, headers, stats)
+    }
 
-        // Update hash ring if needed
-        self.update_hash_ring(workers);
-
-        // Extract hash key with priority: headers > body > fallback
-        let hash_key =
-            hash_key::extract_hash_key_with_config(request_text, headers, &self.session_config);
-
-        // DEBUG: Log the request text and extracted hash key
-        if let Some(text) = request_text {
-            debug!("CONSISTENT_HASH_DEBUG: Request text length: {}", text.len());
-        }
-        if let Some(hdrs) = headers {
-            debug!(
-                "CONSISTENT_HASH_DEBUG: Headers available: {:?}",
-                hdrs.keys().collect::<Vec<_>>()
-            );
-        }
-        info!("CONSISTENT_HASH_DEBUG: Extracted hash key: {}", hash_key);
-
-        // Find target worker using consistent hashing
-        let target_worker_url = match self.find_worker_by_hash(&hash_key) {
-            Some(url) => {
-                info!(
-                    "CONSISTENT_HASH_DEBUG: Hash key '{}' mapped to worker: {}",
-                    hash_key, url
-                );
-                url
-            }
-            None => {
-                // Fallback to first healthy worker if hash ring is empty
-                let fallback_idx = healthy_indices[0];
-                let worker_url = workers[fallback_idx].url();
-                info!(
-                    "CONSISTENT_HASH_DEBUG: Hash ring empty, falling back to worker: {}",
-                    worker_url
-                );
-                RouterMetrics::record_processed_request(worker_url);
-                RouterMetrics::record_policy_decision(self.name(), worker_url);
-                return Some(fallback_idx);
-            }
-        };
-
-        // Handle DP-aware routing - extract base URL if needed
-        let (base_url, dp_rank) = self.extract_dp_info(&target_worker_url);
-
-        // Find the worker index that matches our target
-        let selected_idx = if let Some(_dp_rank) = dp_rank {
-            // For DP-aware routing, find exact match including DP rank
-            workers.iter().position(|w| w.url() == target_worker_url)
-        } else {
-            // For regular routing, find by base URL
-            workers.iter().position(|w| {
-                let (worker_base_url, _) = self.extract_dp_info(w.url());
-                worker_base_url == base_url
-            })
-        };
-
-        debug!(
-            "CONSISTENT_HASH_DEBUG: Target worker URL: {}, DP rank: {:?}",
-            target_worker_url, dp_rank
-        );
-
-        match selected_idx {
-            Some(idx) => {
-                // Verify the worker is healthy
-                if workers[idx].is_healthy() && workers[idx].circuit_breaker().can_execute() {
-                    let worker_url = workers[idx].url();
-                    debug!(
-                        "CONSISTENT_HASH_DEBUG: Selected worker at index {}: {}",
-                        idx, worker_url
-                    );
-                    info!(
-                        "Consistent hash routing: key='{}' -> worker='{}' (index={})",
-                        hash_key, worker_url, idx
-                    );
-
-                    // Increment processed counter
-                    workers[idx].increment_processed();
-                    RouterMetrics::record_processed_request(worker_url);
-                    RouterMetrics::record_policy_decision(self.name(), worker_url);
-
-                    Some(idx)
-                } else {
-                    // Target worker is unhealthy, fall back to first healthy worker
-                    debug!(
-                        "Target worker '{}' is unhealthy, falling back to healthy worker",
-                        workers[idx].url()
-                    );
-                    let fallback_idx = healthy_indices[0];
-                    let worker_url = workers[fallback_idx].url();
-
-                    workers[fallback_idx].increment_processed();
-                    RouterMetrics::record_processed_request(worker_url);
-                    RouterMetrics::record_policy_decision(self.name(), worker_url);
-
-                    Some(fallback_idx)
-                }
-            }
-            None => {
-                // Worker not found in current set, fall back to first healthy worker
-                debug!(
-                    "Target worker '{}' not found in current worker set, falling back",
-                    target_worker_url
-                );
-                let fallback_idx = healthy_indices[0];
-                let worker_url = workers[fallback_idx].url();
-
-                workers[fallback_idx].increment_processed();
-                RouterMetrics::record_processed_request(worker_url);
-                RouterMetrics::record_policy_decision(self.name(), worker_url);
-
-                Some(fallback_idx)
-            }
-        }
+    fn tracks_request_load(&self) -> bool {
+        matches!(
+            self.session_config.new_session_strategy,
+            ConsistentHashNewSessionStrategy::MinLoad
+        )
     }
 
     fn name(&self) -> &'static str {
@@ -492,7 +708,15 @@ impl LoadBalancingPolicy for ConsistentHashPolicy {
             let mut current = self.current_workers.write().unwrap();
             current.clear();
         }
-        info!("Consistent hash policy reset - hash ring cleared");
+        {
+            let mut pins = self.session_pins.write().unwrap();
+            pins.clear();
+        }
+        {
+            let mut order = self.pin_order.write().unwrap();
+            order.clear();
+        }
+        info!("Consistent hash policy reset - hash ring and session pins cleared");
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -602,5 +826,94 @@ mod tests {
             .select_worker_with_headers(&workers, None, Some(&other_headers))
             .unwrap();
         assert!(idx1 != other_idx || workers.len() == 1);
+    }
+
+    #[test]
+    fn test_min_load_placement_pins_session_across_turns() {
+        let config = SessionAffinityConfig {
+            new_session_strategy: ConsistentHashNewSessionStrategy::MinLoad,
+            placement_candidates: 2,
+            session_pin_ttl_secs: 3600,
+            max_session_pins: 100,
+            ..SessionAffinityConfig::default()
+        };
+        let policy = ConsistentHashPolicy::with_session_config(config);
+        let workers: Vec<Arc<dyn Worker>> = vec![
+            Arc::new(BasicWorker::new(
+                "http://worker1:8000".to_string(),
+                WorkerType::Regular,
+            )),
+            Arc::new(BasicWorker::new(
+                "http://worker2:8000".to_string(),
+                WorkerType::Regular,
+            )),
+        ];
+
+        // Worker1 is busy, so the new session must land on worker2.
+        for _ in 0..5 {
+            workers[0].increment_load();
+        }
+        let request = r#"{"session_id": "min_load_session_1"}"#;
+        let first = policy.select_worker(&workers, Some(request)).unwrap();
+        assert_eq!(first, 1, "new session should avoid the busy worker");
+
+        // Later the load flips, but the pinned session must stay on worker2
+        // to preserve KV locality.
+        for _ in 0..10 {
+            workers[1].increment_load();
+        }
+        let second = policy.select_worker(&workers, Some(request)).unwrap();
+        assert_eq!(
+            second, first,
+            "pinned session must not migrate just because load changed"
+        );
+    }
+
+    #[test]
+    fn test_min_load_placement_uses_admission_stats() {
+        let config = SessionAffinityConfig {
+            new_session_strategy: ConsistentHashNewSessionStrategy::MinLoad,
+            placement_candidates: 2,
+            session_pin_ttl_secs: 3600,
+            max_session_pins: 100,
+            ..SessionAffinityConfig::default()
+        };
+        let policy = ConsistentHashPolicy::with_session_config(config);
+        let workers: Vec<Arc<dyn Worker>> = vec![
+            Arc::new(BasicWorker::new(
+                "http://worker1:8000".to_string(),
+                WorkerType::Regular,
+            )),
+            Arc::new(BasicWorker::new(
+                "http://worker2:8000".to_string(),
+                WorkerType::Regular,
+            )),
+        ];
+
+        let mut stats = std::collections::HashMap::new();
+        stats.insert(
+            "http://worker1:8000".to_string(),
+            WorkerAdmissionStats {
+                enabled: true,
+                inflight: 8,
+                queued: 4,
+                max_inflight: 10,
+            },
+        );
+        stats.insert(
+            "http://worker2:8000".to_string(),
+            WorkerAdmissionStats {
+                enabled: true,
+                inflight: 1,
+                queued: 0,
+                max_inflight: 10,
+            },
+        );
+
+        let request = r#"{"session_id": "min_load_stats_session"}"#;
+        let idx = policy
+            .select_worker_with_headers_and_stats(&workers, Some(request), None, Some(&stats))
+            .unwrap();
+        assert_eq!(idx, 1, "placement should prefer the worker with room");
     }
 }

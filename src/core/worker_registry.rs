@@ -2,7 +2,9 @@
 //!
 //! Provides centralized registry for workers with model-based indexing
 
-use crate::core::{AdmissionReject, WorkerAdmission, WorkerAdmissionConfig, WorkerSlotPermit};
+use crate::core::{
+    AdmissionReject, WorkerAdmission, WorkerAdmissionConfig, WorkerAdmissionStats, WorkerSlotPermit,
+};
 use crate::core::{ConnectionMode, Worker, WorkerType};
 use dashmap::DashMap;
 use std::sync::{Arc, RwLock};
@@ -90,6 +92,12 @@ impl WorkerRegistry {
         worker_url: &str,
     ) -> Result<Option<WorkerSlotPermit>, AdmissionReject> {
         self.admission.acquire(worker_url).await
+    }
+
+    /// Snapshot admission state for a worker (used by load-aware policies
+    /// before selecting a worker for a new session).
+    pub fn admission_stats(&self, worker_url: &str) -> WorkerAdmissionStats {
+        self.admission.stats(worker_url)
     }
 
     /// Register a new worker

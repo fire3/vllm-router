@@ -3,7 +3,7 @@
 //! This module provides a unified abstraction for routing policies that work
 //! across both regular and prefill-decode (PD) routing modes.
 
-use crate::core::Worker;
+use crate::core::{Worker, WorkerAdmissionStats};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -61,6 +61,21 @@ pub trait LoadBalancingPolicy: Send + Sync + Debug {
         headers: Option<&RequestHeaders>,
     ) -> Option<usize>;
 
+    /// Select a single worker with real-time per-worker admission stats.
+    ///
+    /// Policies that are load-aware during placement (e.g. consistent-hash
+    /// `min_load` new-session placement) override this; the default delegates
+    /// to `select_worker_with_headers` for backward compatibility.
+    fn select_worker_with_headers_and_stats(
+        &self,
+        workers: &[Arc<dyn Worker>],
+        request_text: Option<&str>,
+        headers: Option<&RequestHeaders>,
+        _stats: Option<&HashMap<String, WorkerAdmissionStats>>,
+    ) -> Option<usize> {
+        self.select_worker_with_headers(workers, request_text, headers)
+    }
+
     /// Select a pair of workers (prefill and decode) for PD routing
     ///
     /// Returns indices of (prefill_worker, decode_worker) from their respective arrays.
@@ -99,6 +114,15 @@ pub trait LoadBalancingPolicy: Send + Sync + Debug {
 
     /// Get policy name for metrics and debugging
     fn name(&self) -> &'static str;
+
+    /// Whether the HTTP router should maintain the legacy running-request
+    /// load counter for this policy.
+    ///
+    /// Used by policies whose placement decisions can fall back to
+    /// `worker.load()` when the per-worker admission gate is disabled.
+    fn tracks_request_load(&self) -> bool {
+        false
+    }
 
     /// Check if this policy needs request text for routing decisions
     fn needs_request_text(&self) -> bool {
