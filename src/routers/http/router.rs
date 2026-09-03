@@ -68,6 +68,21 @@ impl Router {
             .await?;
         }
 
+        // Wait-for-any is only a liveness gate. Probe every configured worker
+        // right before registration so workers whose FastAPI/vLLM server is
+        // still booting start out unhealthy and are never selected until the
+        // health checker confirms them.
+        let initial_health = if worker_urls.is_empty() {
+            HashMap::new()
+        } else {
+            Self::probe_worker_health_statuses(
+                &worker_urls,
+                &ctx.router_config.health_check.endpoint,
+                ctx.router_config.health_check.timeout_secs,
+            )
+            .await
+        };
+
         // Automatically expand to DP-aware workers when intra_node_data_parallel_size > 1
         let worker_urls = if ctx.router_config.intra_node_data_parallel_size > 1 {
             // worker address now in the format of "http://host:port@dp_rank"
@@ -102,6 +117,11 @@ impl Router {
             success_threshold: ctx.router_config.health_check.success_threshold,
         };
         for url in &worker_urls {
+            let probe_key = if dp_size > 1 {
+                dp_utils::parse_worker_url(url).0
+            } else {
+                url.clone()
+            };
             // TODO: In IGW mode, fetch model_id from worker's /get_model_info endpoint
             // For now, create worker without model_id
             let worker_arc: Arc<dyn Worker> = if dp_size > 1 {
@@ -123,6 +143,9 @@ impl Router {
                         .with_health_config(health_config.clone()),
                 )
             };
+            // Never let an unverified worker be routable: healthy only if the
+            // startup probe actually saw its health endpoint return 2xx.
+            worker_arc.set_healthy(initial_health.get(&probe_key).copied().unwrap_or(false));
             ctx.worker_registry.register(worker_arc.clone());
 
             // Notify PolicyRegistry about the new worker
@@ -336,6 +359,63 @@ impl Router {
                 tokio::time::sleep(Duration::from_secs(worker_startup_check_interval_secs)).await;
             }
         }
+    }
+
+    /// Probe every configured worker once and return `url -> healthy`.
+    ///
+    /// Used at startup after the liveness gate so a worker whose HTTP server
+    /// is still starting (e.g. vLLM has not finished booting) is registered
+    /// as unhealthy instead of being immediately routable.
+    async fn probe_worker_health_statuses(
+        worker_urls: &[String],
+        endpoint: &str,
+        timeout_secs: u64,
+    ) -> HashMap<String, bool> {
+        use std::collections::HashSet;
+
+        let mut unique_hosts = Vec::new();
+        let mut seen = HashSet::new();
+        for url in worker_urls {
+            // Strip any DP-aware `@rank` suffix so one physical host is probed
+            // once for all of its data-parallel replicas.
+            let base_url = if let Some(at_pos) = url.rfind('@') {
+                url[..at_pos].to_string()
+            } else {
+                url.clone()
+            };
+            if seen.insert(base_url.clone()) {
+                unique_hosts.push(base_url);
+            }
+        }
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(timeout_secs.max(1)))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
+        let probes: Vec<_> = unique_hosts
+            .iter()
+            .map(|base_url| {
+                let client = client.clone();
+                let health_url = format!("{}{}", base_url, endpoint);
+                let base_url = base_url.clone();
+                tokio::spawn(async move {
+                    let ok = client
+                        .get(&health_url)
+                        .send()
+                        .await
+                        .map(|res| res.status().is_success())
+                        .unwrap_or(false);
+                    (base_url, ok)
+                })
+            })
+            .collect();
+
+        let results = futures::future::join_all(probes).await;
+        results
+            .into_iter()
+            .filter_map(|r| r.ok())
+            .collect::<HashMap<_, _>>()
     }
 
     fn select_first_worker(&self) -> Result<String, String> {
@@ -2149,6 +2229,26 @@ mod tests {
 
         let result = Router::wait_for_healthy_workers(&[healthy_url, unreachable_url], 5, 1).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_probe_worker_health_marks_unstarted_workers_unhealthy() {
+        let (healthy_url, _handle) = start_healthy_mock_server().await;
+        let unstarted_url = "http://127.0.0.1:1".to_string(); // FastAPI not up yet
+
+        let statuses = Router::probe_worker_health_statuses(
+            &[healthy_url.clone(), unstarted_url.clone()],
+            "/health",
+            2,
+        )
+        .await;
+
+        assert_eq!(statuses.get(&healthy_url), Some(&true));
+        assert_eq!(
+            statuses.get(&unstarted_url),
+            Some(&false),
+            "a worker that has not started its server must not be routable"
+        );
     }
 
     /// Helper: start a mock server that returns 503 on /health for a given

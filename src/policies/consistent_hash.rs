@@ -916,4 +916,41 @@ mod tests {
             .unwrap();
         assert_eq!(idx, 1, "placement should prefer the worker with room");
     }
+
+    #[test]
+    fn test_min_load_placement_skips_unhealthy_workers() {
+        let config = SessionAffinityConfig {
+            new_session_strategy: ConsistentHashNewSessionStrategy::MinLoad,
+            placement_candidates: 2,
+            session_pin_ttl_secs: 3600,
+            max_session_pins: 100,
+            ..SessionAffinityConfig::default()
+        };
+        let policy = ConsistentHashPolicy::with_session_config(config);
+        let workers: Vec<Arc<dyn Worker>> = vec![
+            Arc::new(BasicWorker::new(
+                "http://worker1:8000".to_string(),
+                WorkerType::Regular,
+            )),
+            Arc::new(BasicWorker::new(
+                "http://worker2:8000".to_string(),
+                WorkerType::Regular,
+            )),
+        ];
+
+        // The unhealthy worker is also the least loaded one, so a min-load
+        // implementation that ignored health would pick it.
+        workers[0].set_healthy(false);
+
+        let request = r#"{"session_id": "min_load_health_session"}"#;
+        let idx = policy
+            .select_worker_with_headers_and_stats(&workers, Some(request), None, None)
+            .unwrap();
+
+        assert!(
+            workers[idx].is_healthy(),
+            "min_load placement must never select an unhealthy worker"
+        );
+        assert_eq!(idx, 1);
+    }
 }
