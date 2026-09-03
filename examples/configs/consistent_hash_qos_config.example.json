@@ -14,7 +14,7 @@
 
   "max_concurrent_requests_per_worker": 24,
   "worker_queue_size": 100,
-  "queue_timeout_secs": 60,
+  "queue_timeout_secs": 0,
 
   "worker_startup_timeout_secs": 600,
   "worker_startup_check_interval": 30,

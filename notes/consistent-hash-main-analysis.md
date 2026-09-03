@@ -215,7 +215,8 @@ consistent hash 本身不提供以下能力，但 router 的通用层在它之�
 `src/middleware.rs:494` 的并发限制中间件：
 
 - Token bucket + 可选队列；桶满时默认返回 429，可排队（队列满也 429）；
-- RouterConfig 默认：`max_concurrent_requests=32768`、`queue_size=100`、`queue_timeout_secs=60`。
+- RouterConfig 默认：`max_concurrent_requests=32768`、`queue_size=100`、
+  `queue_timeout_secs=0`（不限时等待；正数才在超时后返回 408）。
 
 这与一致哈希无关，但对整体 SLO 有效。
 

@@ -329,7 +329,7 @@ impl Router {
         // IGW defaults
         enable_igw = false,
         queue_size = 100,
-        queue_timeout_secs = 60,
+        queue_timeout_secs = 0, // 0 = wait indefinitely (no 408 from queuing)
         rate_limit_tokens_per_second = None,
         // Tracing defaults
         enable_trace = false,

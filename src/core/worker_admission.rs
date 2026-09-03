@@ -6,6 +6,13 @@
 //! per-worker gate that is acquired *after* a worker is selected (so
 //! consistent-hash affinity is preserved) and held until the worker stream
 //! really finishes.
+//!
+//! Queue waits are bounded by `worker_queue_size` (overflow returns 429).
+//! A `queue_timeout` of zero means queued requests wait indefinitely (the
+//! recommended setting for multi-turn agent traffic, so the router never
+//! cuts the client off with a 408 while a worker is merely busy). A positive
+//! `queue_timeout` remains available as a safety net and returns 408 when
+//! the wait is exceeded.
 
 use crate::metrics::RouterMetrics;
 use dashmap::DashMap;
@@ -36,7 +43,7 @@ impl Default for WorkerAdmissionConfig {
         Self {
             max_concurrent_requests_per_worker: None,
             worker_queue_size: 100,
-            queue_timeout: Duration::from_secs(60),
+            queue_timeout: Duration::ZERO, // 0 = wait indefinitely
         }
     }
 }
@@ -54,6 +61,8 @@ impl AdmissionReject {
     pub fn status_code(self) -> StatusCode {
         match self {
             Self::QueueFull => StatusCode::TOO_MANY_REQUESTS,
+            // Only produced when an explicit positive queue_timeout is set;
+            // with the default (0) queued requests wait indefinitely.
             Self::QueueTimeout => StatusCode::REQUEST_TIMEOUT,
         }
     }
@@ -122,7 +131,15 @@ impl WorkerLimits {
         let _queue_guard = QueuedGuard::new(Arc::clone(self));
 
         let started = Instant::now();
-        let wait_result = timeout(self.queue_timeout, self.inflight.clone().acquire_owned()).await;
+        // queue_timeout == 0 means the router holds the connection and waits
+        // for a free slot instead of failing the client with a 408. The only
+        // ways out are acquiring a slot, queue overflow, or the client
+        // disconnecting (which cancels this task and drops the queue permit).
+        let wait_result = if self.queue_timeout.is_zero() {
+            Ok(self.inflight.clone().acquire_owned().await)
+        } else {
+            timeout(self.queue_timeout, self.inflight.clone().acquire_owned()).await
+        };
         drop(queue_permit);
 
         match wait_result {
@@ -351,6 +368,33 @@ mod tests {
 
         let result = admission.acquire("http://w1:8000").await;
         assert!(matches!(result, Err(AdmissionReject::QueueTimeout)));
+    }
+
+    #[tokio::test]
+    async fn zero_timeout_waits_indefinitely_for_slot() {
+        let admission = WorkerAdmission::new(config(Some(1), 1, 0));
+        let first = admission
+            .acquire("http://w1:8000")
+            .await
+            .unwrap()
+            .expect("first permit");
+
+        let admission_clone = admission.clone();
+        let second = tokio::spawn(async move {
+            admission_clone
+                .acquire("http://w1:8000")
+                .await
+                .unwrap()
+                .expect("second permit should wait then succeed")
+        });
+
+        // A zero timeout must not reject the queued request; it waits until
+        // the first slot is released.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!second.is_finished());
+
+        drop(first);
+        second.await.unwrap();
     }
 
     #[tokio::test]

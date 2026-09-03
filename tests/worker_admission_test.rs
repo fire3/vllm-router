@@ -90,6 +90,51 @@ async fn per_worker_gate_queues_excess_and_rejects_when_full() {
 }
 
 #[tokio::test]
+async fn zero_queue_timeout_keeps_waiting_until_slot_is_free() {
+    let mut worker = MockWorker::new(MockWorkerConfig {
+        port: 20703,
+        worker_type: WorkerType::Regular,
+        health_status: HealthStatus::Healthy,
+        response_delay_ms: 300,
+        fail_rate: 0.0,
+    });
+    let url = worker.start().await.unwrap();
+
+    let config = RouterConfig {
+        mode: RoutingMode::Regular {
+            worker_urls: vec![url],
+        },
+        policy: PolicyConfig::Random,
+        worker_startup_timeout_secs: 1,
+        worker_startup_check_interval_secs: 1,
+        request_timeout_secs: 10,
+        ..Default::default()
+    };
+
+    // queue_timeout == 0 means the second request must wait (not fail with
+    // 408) until the first request releases the only per-worker slot.
+    let admission = WorkerAdmissionConfig {
+        max_concurrent_requests_per_worker: Some(1),
+        worker_queue_size: 1,
+        queue_timeout: Duration::ZERO,
+    };
+    let app_context = common::create_test_context_with_admission(config, admission);
+    let router: Arc<dyn RouterTrait> =
+        Arc::from(RouterFactory::create_router(&app_context).await.unwrap());
+
+    let body = chat_request();
+    let (r1, r2) = tokio::join!(
+        router.route_chat(None, &body, None),
+        router.route_chat(None, &body, None),
+    );
+
+    assert_eq!(r1.status(), StatusCode::OK);
+    assert_eq!(r2.status(), StatusCode::OK);
+
+    worker.stop().await;
+}
+
+#[tokio::test]
 async fn per_worker_gate_also_covers_transparent_proxy() {
     let mut worker = MockWorker::new(MockWorkerConfig {
         port: 20702,

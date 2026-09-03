@@ -423,14 +423,20 @@ impl QueueProcessor {
         // Process requests in a single task to reduce overhead
         while let Some(queued) = self.queue_rx.recv().await {
             // Check timeout immediately
+            // queue_timeout == 0 disables the deadline: requests wait until a
+            // token is available or the client disconnects, so overloaded
+            // agents are never cut off with a 408 while the queue is merely
+            // backed up.
             let elapsed = queued.queued_at.elapsed();
-            if elapsed >= self.queue_timeout {
+            let remaining_timeout = if self.queue_timeout.is_zero() {
+                None
+            } else if elapsed >= self.queue_timeout {
                 warn!("Request already timed out in queue");
                 let _ = queued.permit_tx.send(Err(StatusCode::REQUEST_TIMEOUT));
                 continue;
-            }
-
-            let remaining_timeout = self.queue_timeout - elapsed;
+            } else {
+                Some(self.queue_timeout - elapsed)
+            };
 
             // Try to acquire token for this request
             if self.token_bucket.try_acquire(1.0).await.is_ok() {
@@ -442,19 +448,34 @@ impl QueueProcessor {
                 let token_bucket = self.token_bucket.clone();
 
                 // Spawn task only when we actually need to wait
-                tokio::spawn(async move {
-                    if token_bucket
-                        .acquire_timeout(1.0, remaining_timeout)
-                        .await
-                        .is_ok()
-                    {
+                match remaining_timeout {
+                    None => tokio::spawn(async move {
+                        // Wait without a deadline. acquire() can still return
+                        // an error if competing waiters consumed tokens before
+                        // the computed refill delay elapsed, so retry until a
+                        // token is actually granted.
+                        loop {
+                            if token_bucket.acquire(1.0).await.is_ok() {
+                                break;
+                            }
+                        }
                         debug!("Queue: acquired token after waiting");
                         let _ = queued.permit_tx.send(Ok(()));
-                    } else {
-                        warn!("Queue: request timed out waiting for token");
-                        let _ = queued.permit_tx.send(Err(StatusCode::REQUEST_TIMEOUT));
-                    }
-                });
+                    }),
+                    Some(remaining_timeout) => tokio::spawn(async move {
+                        if token_bucket
+                            .acquire_timeout(1.0, remaining_timeout)
+                            .await
+                            .is_ok()
+                        {
+                            debug!("Queue: acquired token after waiting");
+                            let _ = queued.permit_tx.send(Ok(()));
+                        } else {
+                            warn!("Queue: request timed out waiting for token");
+                            let _ = queued.permit_tx.send(Err(StatusCode::REQUEST_TIMEOUT));
+                        }
+                    }),
+                };
             }
         }
 

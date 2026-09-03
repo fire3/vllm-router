@@ -70,8 +70,9 @@ class RouterArgs:
     worker_queue_size: int = 100
     # Queue size for pending requests when max concurrent limit reached
     queue_size: int = 100
-    # Maximum time (in seconds) a request can wait in queue before timing out
-    queue_timeout_secs: int = 60
+    # Maximum time (in seconds) a request can wait in queue before timing out.
+    # 0 (default) = wait indefinitely (no 408 from queuing).
+    queue_timeout_secs: int = 0
     # Token bucket refill rate (tokens per second). If not set, defaults to max_concurrent_requests
     rate_limit_tokens_per_second: Optional[int] = None
     # CORS allowed origins
@@ -487,7 +488,8 @@ class RouterArgs:
             f"--{prefix}queue-timeout-secs",
             type=int,
             default=RouterArgs.queue_timeout_secs,
-            help="Maximum time (in seconds) a request can wait in queue before timing out",
+            help="Maximum time (in seconds) a request can wait in queue before timing out; "
+            "0 = wait indefinitely (no 408 from queuing)",
         )
         parser.add_argument(
             f"--{prefix}rate-limit-tokens-per-second",

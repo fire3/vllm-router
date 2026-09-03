@@ -48,7 +48,9 @@ pub struct RouterConfig {
     pub max_concurrent_requests: usize,
     /// Queue size for pending requests when max concurrent limit reached (0 = no queue, return 429 immediately)
     pub queue_size: usize,
-    /// Maximum time (in seconds) a request can wait in queue before timing out
+    /// Maximum time (in seconds) a request can wait in queue before timing out.
+    /// `0` (the default) disables the timeout: requests wait until a slot is
+    /// available or the client disconnects, instead of failing with a 408.
     pub queue_timeout_secs: u64,
     /// Token bucket refill rate (tokens per second). If not set, defaults to max_concurrent_requests
     pub rate_limit_tokens_per_second: Option<usize>,
@@ -502,7 +504,7 @@ impl Default for RouterConfig {
             request_id_headers: None,
             max_concurrent_requests: 32768,
             queue_size: 100,
-            queue_timeout_secs: 60,
+            queue_timeout_secs: 0, // 0 = wait indefinitely (no 408 from queuing)
             rate_limit_tokens_per_second: None,
             cors_allowed_origins: vec![],
             retry: RetryConfig::default(),

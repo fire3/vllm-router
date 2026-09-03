@@ -43,7 +43,7 @@
   "request_timeout_secs": 1800,
   "max_concurrent_requests": 32768,
   "queue_size": 100,
-  "queue_timeout_secs": 60,
+  "queue_timeout_secs": 0,
   "rate_limit_tokens_per_second": null,
   "cors_allowed_origins": [],
 

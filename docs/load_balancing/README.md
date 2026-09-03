@@ -144,9 +144,12 @@ vllm-router \
   --policy consistent_hash \
   --worker-urls http://worker1:8000 http://worker2:8000 \
   --max-concurrent-requests-per-worker 24 \
-  --worker-queue-size 100 \
-  --queue-timeout-secs 60
+  --worker-queue-size 100
 ```
+
+`queue_timeout_secs=0`（默认，JSON 配置）表示排队不限时：请求会保持连接等待 worker 空出
+在途席位，而不会在压力大时被 router 主动以 408 掐断，避免 agent 客户端进入
+“超时-重试-再超时”循环。配置正数才会在排队超时后返回 408（仅作兜底）。
 
 See [Consistent hash QoS queuing](consistent_hash_qos.md) for design,
 configuration, metrics and tuning guidance.

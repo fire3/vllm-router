@@ -38,8 +38,13 @@ NewAPI
 - **在途计数覆盖完整生命周期**：streaming 请求的席位要等 `[DONE]` / 流结束 /
   通道断开才释放，和 `send_typed_request` 中 worker load 的释放点一致。
 - **每个 worker 独立排队**：一台 worker 满不会堵住其他空闲 worker。
-- **有界队列**：超出 `worker_queue_size` 的请求直接返回 429；排队超时返回 408。
-  这两种响应是 router 自身产生的，不会触发 worker 熔断或重试风暴。
+- **有界队列 + 不限时等待（默认）**：超出 `worker_queue_size` 的请求直接返回
+  429；队列内的请求默认无限等待（`queue_timeout_secs=0`），直到拿到在途席位或
+  客户端断开。这样高负载时连接会被 router 一直保持，agent 客户端不会因为 router
+  主动返回 408 而开始“超时-重试-再超时”的循环。
+- **408 只是显式配置的兜底**：只有当给 `queue_timeout_secs` 配置了正数时，
+  排队超过该时长才返回 408。429 / 408 都是 router 自身产生的响应，不会触发
+  worker 熔断或 router 内部重试风暴。
 - **默认关闭**：不设置 `max_concurrent_requests_per_worker` 时行为与之前一致。
 
 ## 3. 配置
@@ -51,9 +56,11 @@ vllm-router \
   --policy consistent_hash \
   --worker-urls http://worker1:8000 http://worker2:8000 \
   --max-concurrent-requests-per-worker 24 \
-  --worker-queue-size 100 \
-  --queue-timeout-secs 60
+  --worker-queue-size 100
 ```
+
+> 排队等待时长通过 JSON 配置里的 `queue_timeout_secs` 控制（CLI 暂未暴露该
+> 参数）：`0` 表示不限时等待（推荐），正数表示最多等待这么多秒后返回 408。
 
 JSON 配置文件：
 
@@ -63,7 +70,7 @@ JSON 配置文件：
   "worker_urls": ["http://worker1:8000", "http://worker2:8000"],
   "max_concurrent_requests_per_worker": 24,
   "worker_queue_size": 100,
-  "queue_timeout_secs": 60
+  "queue_timeout_secs": 0
 }
 ```
 
@@ -76,7 +83,7 @@ JSON 配置文件：
 |---|---|---|
 | `max_concurrent_requests_per_worker` | `null`（关闭） | 每台 worker 允许同时在途的请求数；设 `0` 等价关闭 |
 | `worker_queue_size` | `100` | 每台 worker 的排队容量；`0` 表示满了直接 429 |
-| `queue_timeout_secs` | `60` | 在 worker 队列中最多等待秒数，超时返回 408 |
+| `queue_timeout_secs` | `0` | 在 worker 队列中的等待上限（秒）；`0` 表示不限时等待、保持连接直到拿到席位或客户端断开，正数表示超时返回 408（兜底） |
 
 Python `Router` 构造参数同名：
 
@@ -86,7 +93,7 @@ Router(
     worker_urls=["http://worker1:8000", "http://worker2:8000"],
     max_concurrent_requests_per_worker=24,
     worker_queue_size=100,
-    queue_timeout_secs=60,
+    queue_timeout_secs=0,
 )
 ```
 
@@ -111,7 +118,8 @@ curl -s http://worker:8000/metrics | grep '^vllm:num_requests_waiting'
 - `vllm_router_worker_inflight_requests{worker}`：当前在途请求数
 - `vllm_router_worker_queued_requests{worker}`：当前排队请求数
 - `vllm_router_worker_admission_rejects_total{worker,reason}`：
-  `queue_full` / `queue_timeout` 计数
+  `queue_full` / `queue_timeout` 计数（`queue_timeout_secs=0` 时不会有
+  `queue_timeout` 计数）
 
 配合 vLLM 侧的 `vllm:num_requests_running` 和 TPOT/TTFT，可以确认门禁是否把
 running 压到了目标区间。
