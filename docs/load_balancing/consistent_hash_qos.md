@@ -61,18 +61,37 @@ NewAPI
 
 ## 3. 配置
 
+### 开箱即用（只改 worker）
+
+默认推荐直接用
+`examples/configs/consistent_hash_router_config.example.json`：
+
+- `policy=consistent_hash` + `new_session_strategy=min_load`（新会话负载感知首跳）；
+- session 配置覆盖各 agent 客户端的会话头/body 字段；
+- 每台 worker 在途并发默认 `8`，排队容量 `100`，排队不限时
+  （`queue_timeout_secs=0`）；
+- 只需把 `worker_urls` 改成你的 vLLM worker，然后：
+
+```bash
+./target/release/vllm-router --config examples/configs/consistent_hash_router_config.example.json
+```
+
+如果配置文件不在仓库根目录运行，请把 `hash_key_config` 改成绝对路径或相对
+当前工作目录的路径。
+
 命令行：
 
 ```bash
 vllm-router \
   --policy consistent_hash \
   --worker-urls http://worker1:8000 http://worker2:8000 \
-  --max-concurrent-requests-per-worker 24 \
-  --worker-queue-size 100
+  --max-concurrent-requests-per-worker 8 \
+  --worker-queue-size 100 \
+  --queue-timeout-secs 0
 ```
 
-> 排队等待时长通过 JSON 配置里的 `queue_timeout_secs` 控制（CLI 暂未暴露该
-> 参数）：`0` 表示不限时等待（推荐），正数表示最多等待这么多秒后返回 408。
+> `queue_timeout_secs=0`（默认）表示不限时等待（推荐），正数表示最多等待
+> 这么多秒后返回 408。
 
 JSON 配置文件：
 
@@ -80,7 +99,7 @@ JSON 配置文件：
 {
   "policy": "consistent_hash",
   "worker_urls": ["http://worker1:8000", "http://worker2:8000"],
-  "max_concurrent_requests_per_worker": 24,
+  "max_concurrent_requests_per_worker": 8,
   "worker_queue_size": 100,
   "queue_timeout_secs": 0
 }
@@ -126,13 +145,13 @@ Python `Router` 构造参数同名：
 Router(
     policy=PolicyType.ConsistentHash,
     worker_urls=["http://worker1:8000", "http://worker2:8000"],
-    max_concurrent_requests_per_worker=24,
+    max_concurrent_requests_per_worker=8,
     worker_queue_size=100,
     queue_timeout_secs=0,
 )
 ```
 
-## 4. 如何把 24 这类值调出来
+## 4. 如何把 8 这类值调出来
 
 建议先看 vLLM worker 的 Prometheus：
 

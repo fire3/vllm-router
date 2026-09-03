@@ -439,6 +439,11 @@ struct CliArgs {
     #[arg(long, default_value_t = 100)]
     worker_queue_size: usize,
 
+    /// Maximum time (in seconds) a request can wait in a worker queue before
+    /// timing out. 0 (default) = wait indefinitely (no 408 from queuing).
+    #[arg(long, default_value_t = 0)]
+    queue_timeout_secs: u64,
+
     /// CORS allowed origins
     #[arg(long, num_args = 0..)]
     cors_allowed_origins: Vec<String>,
@@ -745,8 +750,8 @@ impl CliArgs {
                 Some(self.request_id_headers.clone())
             },
             max_concurrent_requests: self.max_concurrent_requests,
-            queue_size: 100,       // Default queue size
-            queue_timeout_secs: 0, // 0 = wait indefinitely (no 408 from queuing)
+            queue_size: 100, // Default queue size
+            queue_timeout_secs: self.queue_timeout_secs,
             cors_allowed_origins: self.cors_allowed_origins.clone(),
             retry: RetryConfig {
                 max_retries: self.retry_max_retries,
@@ -1155,10 +1160,13 @@ mod tests {
                 "http://worker3:8000".to_string(),
             ]
         );
+        assert_eq!(cli.max_concurrent_requests_per_worker, Some(8));
+        assert_eq!(cli.worker_queue_size, 100);
+        assert_eq!(cli.queue_timeout_secs, 0);
         assert!(cli
             .hash_key_config
             .as_deref()
             .unwrap()
-            .ends_with("consistent_hash_session_config.full.json"));
+            .ends_with("consistent_hash_session_config.min_load.json"));
     }
 }

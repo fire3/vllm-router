@@ -143,7 +143,7 @@ protected:
 vllm-router \
   --policy consistent_hash \
   --worker-urls http://worker1:8000 http://worker2:8000 \
-  --max-concurrent-requests-per-worker 24 \
+  --max-concurrent-requests-per-worker 8 \
   --worker-queue-size 100
 ```
 

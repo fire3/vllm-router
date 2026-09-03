@@ -10,7 +10,11 @@
 
   "policy": "consistent_hash",
 
-  "hash_key_config": "examples/configs/consistent_hash_session_config.full.json",
+  "hash_key_config": "examples/configs/consistent_hash_session_config.min_load.json",
+
+  "max_concurrent_requests_per_worker": 8,
+  "worker_queue_size": 100,
+  "queue_timeout_secs": 0,
 
   "worker_startup_timeout_secs": 600,
   "worker_startup_check_interval": 30,
