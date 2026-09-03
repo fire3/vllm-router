@@ -679,6 +679,26 @@ impl Router {
                     }
                 };
 
+                // The worker's health can change while this request was waiting
+                // in the queue. Never send to a worker that became unavailable
+                // during the wait: release the slot and return a retryable 503
+                // so the retry loop picks a different worker.
+                if !worker.is_available() {
+                    debug!(
+                        worker = %worker.url(),
+                        "per-worker admission: worker became unavailable while queued, retrying"
+                    );
+                    RouterMetrics::record_request_error(route, "worker_unavailable_after_queue");
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        format!(
+                            "Worker {} became unavailable while waiting in queue",
+                            worker.url()
+                        ),
+                    )
+                        .into_response();
+                }
+
                 // Optional load tracking for cache-aware policy
                 // Get the policy for this model to check if it's cache-aware
                 let policy = match model_id {
@@ -1844,6 +1864,24 @@ impl RouterTrait for Router {
                 return response;
             }
         };
+
+        // Same guard as the typed path: if the worker went unhealthy while
+        // this request waited in its queue, fail fast instead of forwarding
+        // to a worker that is no longer available.
+        if !worker.is_available() {
+            debug!(
+                worker = %worker.url(),
+                "transparent proxy: worker became unavailable while queued"
+            );
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!(
+                    "Worker {} became unavailable while waiting in queue",
+                    worker.url()
+                ),
+            )
+                .into_response();
+        }
 
         debug!("Transparent proxy: forwarding to {}", url);
 

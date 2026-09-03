@@ -189,6 +189,9 @@ running 压到了目标区间。
 - 启动时 router 会逐台探测 worker 的 health endpoint：只要还有 FastAPI/vLLM
   服务没有起来，该 worker 会以 unhealthy 状态注册，min_load 和纯 ring 都
   不会把它选给新会话；等 health checker 连续探测成功后它才会进入可路由集合。
+- 请求在队列里等待期间 worker 变不健康/熔断打开时，router 拿到席位后会先复查
+  `is_available()`：不再可用就释放席位并返回可重试的 503，由重试层重新选一台
+  健康 worker（不会把请求发向已不健康的 worker）。
 - 原有的全局 `max_concurrent_requests / queue_size` 仍然生效，它是 router
   入口的“第一道闸”；per-worker gate 是选路后的“第二道闸”。调优 worker 上限时，
   建议把全局 `max_concurrent_requests` 保持在明显高于 `worker 数 ×
